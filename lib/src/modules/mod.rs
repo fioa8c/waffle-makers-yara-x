@@ -17,8 +17,6 @@ pub mod protos {
 #[cfg(test)]
 mod tests;
 
-pub(crate) mod field_docs;
-
 #[allow(unused_imports)]
 pub(crate) mod prelude {
     pub(crate) use crate::scanner::ScanContext;
@@ -33,6 +31,7 @@ pub(crate) mod prelude {
     pub(crate) use linkme::distributed_slice;
     pub(crate) use yara_x_macros::{module_export, module_main, wasm_export};
 }
+
 include!("modules.rs");
 
 /// Enum describing errors occurred in modules.
@@ -391,7 +390,7 @@ pub mod mods {
                             .map(|(name, ty)| (name.clone(), Type::from(ty)))
                             .collect(),
                         ret: Type::from(&signature.result),
-                        doc: signature.doc.clone(),
+                        description: signature.description.clone(),
                     });
                 }
 
@@ -406,8 +405,8 @@ pub mod mods {
             pub args: Vec<(String, Type)>,
             /// The return type for the function.
             pub ret: Type,
-            /// Function's documentation.
-            pub doc: Option<Cow<'static, str>>,
+            /// Function's documentation description.
+            pub description: Option<Cow<'static, str>>,
         }
 
         /// Describes a field within a structure or module.
@@ -433,11 +432,6 @@ pub mod mods {
             /// Returns the type of the field.
             pub fn ty(&self) -> Type {
                 Type::from(&self.struct_field.type_value)
-            }
-
-            /// Returns the documentation for the current field.
-            pub fn doc(&self) -> Option<&str> {
-                self.struct_field.doc.as_deref()
             }
         }
 

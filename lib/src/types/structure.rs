@@ -104,8 +104,6 @@ pub(crate) struct StructField {
     /// Deprecation notice that must be shown when the field is used in a
     /// rule. This is `None` for non-deprecated fields.
     pub deprecation_notice: Option<DeprecationNotice>,
-    /// Description of the field extracted from the .proto file.
-    pub doc: Option<String>,
 }
 
 /// A dynamic structure with one or more fields.
@@ -212,7 +210,6 @@ impl Struct {
                     number: 0,
                     acl: None,
                     deprecation_notice: None,
-                    doc: None,
                 });
 
             if let TypeValue::Struct(ref mut s) = field.type_value {
@@ -235,7 +232,6 @@ impl Struct {
                     number: 0,
                     acl: None,
                     deprecation_notice: None,
-                    doc: None,
                 },
             )
         }
@@ -441,7 +437,6 @@ impl Struct {
                     acl: Self::acl(&fd),
                     deprecation_notice: Self::deprecation_notice(&fd),
                     number,
-                    doc: Self::field_doc(msg_descriptor.full_name(), number),
                 },
             ));
         }
@@ -787,17 +782,6 @@ impl Struct {
                     })
                     .collect()
             })
-    }
-
-    fn field_doc(msg_name: &str, field_number: u64) -> Option<String> {
-        use crate::modules::field_docs::FIELD_DOCS;
-        let idx = FIELD_DOCS
-            .binary_search_by(|&(name, number, _)| match name.cmp(msg_name) {
-                std::cmp::Ordering::Equal => number.cmp(&field_number),
-                ord => ord,
-            })
-            .ok()?;
-        Some(FIELD_DOCS[idx].2.to_string())
     }
 
     /// Given a protobuf type and value returns a [`TypeValue`].

@@ -185,6 +185,29 @@ pub const SCAN_LIST_LONG_HELP: &str = r#"Indicate that TARGET_PATH is a file con
 <TARGET_PATH> must be a text file containing one path per line. The paths must
 be either absolute paths, or relative to the current directory."#;
 
+pub const SCAN_FILTER_LONG_HELP: &str = r#"Only scan files that match the given pattern
+
+Patterns can contains the following wildcards:
+
+?      matches any single character.
+
+*      matches any sequence of characters, except the path separator.
+
+**     matches any sequence of characters, including the path separator.
+
+[...]  matches any character inside the brackets. Can also specify ranges of
+       characters (e.g. [0-9], [a-z])
+
+[!...] is the negation of [...]
+
+This option can be used more than once with different patterns. In such cases
+files matching any of the patterns will be scanned.
+
+Examples:
+
+--filter "**/*.exe"
+--filter "**/*.dll" --filter "**/*.sys""#;
+
 pub const SCAN_LONG_HELP: &str = r#"Scan a file or directory
 
 <RULES_PATH> can be the path to a file containing YARA rules, or the path to a directory

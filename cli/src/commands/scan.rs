@@ -108,6 +108,10 @@ pub fn scan() -> Command {
             arg!(--"scan-list")
                 .help("Indicate that TARGET_PATH is a file containing the paths to be scanned")
                 .long_help(help::SCAN_LIST_LONG_HELP),
+            arg!(-f --filter <PATTERN>)
+                .help("Scan files that match the given pattern only")
+                .long_help(help::SCAN_FILTER_LONG_HELP)
+                .action(ArgAction::Append),
             arg!(-z --"skip-larger" <FILE_SIZE>)
                 .help("Skip files larger than the given size")
                 .value_parser(value_parser!(u64)),
@@ -180,6 +184,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
     let profiling = args.get_flag("profiling");
     let num_threads = args.get_one::<u8>("threads");
     let skip_larger = args.get_one::<u64>("skip-larger");
+    let filters = args.get_many::<String>("filter");
     let disable_console_logs = args.get_flag("disable-console-logs");
     let scan_list = args.get_flag("scan-list");
     let recursive = args.get_one::<usize>("recursive");
@@ -264,6 +269,12 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
 
     if let Some(num_threads) = num_threads {
         w.num_threads(*num_threads);
+    }
+
+    if let Some(filters) = filters {
+        for filter in filters {
+            w.filter(filter);
+        }
     }
 
     if let Some(max_file_size) = skip_larger {
