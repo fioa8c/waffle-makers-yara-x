@@ -888,6 +888,9 @@ fn rules_profiling() {
     assert_eq!(slowest_rules.len(), 0);
 }
 
+// NOTE: This test does not compile until Task 4 adds `ScanOptions::label` and
+// Task 6 adds `ProfilingData::top_offenders`. It is intentionally placed early
+// so the test exists alongside the implementation it exercises.
 #[cfg(feature = "rules-profiling")]
 #[test]
 fn rules_profiling_per_file_offenders() {

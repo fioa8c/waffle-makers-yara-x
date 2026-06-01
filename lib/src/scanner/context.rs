@@ -291,8 +291,11 @@ impl ScanContext<'_, '_> {
             for (rule_id, rule) in
                 self.compiled_rules.rules().iter().enumerate()
             {
+                // `saturating_sub` defends against a stale baseline (e.g.,
+                // if `clear_profiling_data` reset the counters but not the
+                // baseline). In the well-formed case, current >= baseline.
                 let cond_delta = self.time_spent_in_rule[rule_id]
-                    - self.time_spent_in_rule_baseline[rule_id];
+                    .saturating_sub(self.time_spent_in_rule_baseline[rule_id]);
 
                 let mut pat_delta: u64 = 0;
                 for p in rule.patterns.iter() {
@@ -306,7 +309,7 @@ impl ScanContext<'_, '_> {
                         .get(&p.pattern_id)
                         .copied()
                         .unwrap_or(0);
-                    pat_delta += current - baseline;
+                    pat_delta += current.saturating_sub(baseline);
                 }
 
                 let rule_total = cond_delta + pat_delta;
