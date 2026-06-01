@@ -34,6 +34,8 @@ use crate::re::hir::ChainedPatternGap;
 use crate::re::thompson::PikeVM;
 #[cfg(feature = "rules-profiling")]
 use crate::scanner::ProfilingData;
+#[cfg(feature = "rules-profiling")]
+use crate::scanner::profiling::BoundedTopK;
 use crate::scanner::matches::{Match, PatternMatches, UnconfirmedMatch};
 use crate::scanner::{DataSnippets, ScanError, ScannedData};
 use crate::scanner::{HEARTBEAT_COUNTER, INIT_HEARTBEAT};
@@ -183,14 +185,15 @@ pub(crate) struct ScanContext<'r, 'd> {
     #[cfg(feature = "rules-profiling")]
     pub time_spent_in_pattern_baseline: FxHashMap<PatternId, u64>,
     /// One bounded top-K min-heap per rule, capacity 10. Each entry is a
-    /// `(time spent on this scan, label)` pair. Lazily allocated.
+    /// `(time spent on this scan, label)` pair. The inner heap does not
+    /// allocate until the first insertion.
     #[cfg(feature = "rules-profiling")]
     pub top_offenders_per_rule:
-        Vec<crate::scanner::profiling::BoundedTopK>,
+        Vec<BoundedTopK>,
     /// Global bounded top-K min-heap (capacity 10) holding the labels of the
     /// scans that took the most total time (sum of all per-rule deltas).
     #[cfg(feature = "rules-profiling")]
-    pub top_files: crate::scanner::profiling::BoundedTopK,
+    pub top_files: BoundedTopK,
     /// Label for the current/next scan. Set by `Scanner::scan_*` before the
     /// scan begins; consumed by `record_scan_attribution` at the end.
     #[cfg(feature = "rules-profiling")]
@@ -1901,10 +1904,10 @@ pub fn create_wasm_store_and_ctx<'r>(
         time_spent_in_pattern_baseline: FxHashMap::default(),
         #[cfg(feature = "rules-profiling")]
         top_offenders_per_rule: (0..num_rules as usize)
-            .map(|_| crate::scanner::profiling::BoundedTopK::new(10))
+            .map(|_| BoundedTopK::new(10))
             .collect(),
         #[cfg(feature = "rules-profiling")]
-        top_files: crate::scanner::profiling::BoundedTopK::new(10),
+        top_files: BoundedTopK::new(10),
         #[cfg(feature = "rules-profiling")]
         current_label: None,
         #[cfg(any(feature = "rules-profiling", feature = "logging"))]
