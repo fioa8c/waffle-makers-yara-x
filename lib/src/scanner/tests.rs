@@ -972,3 +972,42 @@ fn rules_profiling_slowest_files() {
         assert!(w[0].time >= w[1].time, "files not sorted descending");
     }
 }
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_clear_resets_offenders() {
+    let rules = crate::compile(
+        r#"
+    rule slow {
+      condition:
+        for any i in (0..200000) : (uint8(i % filesize) == 0xCC)
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    let opts = crate::ScanOptions::new().label("before_clear");
+    scanner.scan_with_options(&vec![0u8; 4096], opts).unwrap();
+
+    scanner.clear_profiling_data();
+
+    let opts = crate::ScanOptions::new().label("after_clear");
+    scanner.scan_with_options(&vec![0u8; 4096], opts).unwrap();
+
+    let slowest = scanner.slowest_rules(10);
+    // Slow rule may or may not have crossed the 100ms cumulative threshold
+    // post-clear depending on the host; if it has, only "after_clear"
+    // should appear.
+    for r in &slowest {
+        for offender in &r.top_offenders {
+            assert_ne!(offender.label, "before_clear");
+        }
+    }
+
+    let files = scanner.slowest_files(10);
+    for f in &files {
+        assert_ne!(f.label, "before_clear");
+    }
+}

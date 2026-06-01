@@ -288,6 +288,13 @@ impl ScanContext<'_, '_> {
     pub fn clear_profiling_data(&mut self) {
         self.time_spent_in_rule.fill(0);
         self.time_spent_in_pattern.clear();
+        self.time_spent_in_rule_baseline.fill(0);
+        self.time_spent_in_pattern_baseline.clear();
+        self.top_offenders_per_rule = (0..self.compiled_rules.num_rules())
+            .map(|_| BoundedTopK::new(10))
+            .collect();
+        self.top_files = BoundedTopK::new(10);
+        self.current_label = None;
     }
 
     /// Records per-rule timing deltas for the just-completed scan against
