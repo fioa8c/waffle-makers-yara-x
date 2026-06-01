@@ -301,6 +301,10 @@ impl<'r> Scanner<'r> {
         &'a mut self,
         data: &'a [u8],
     ) -> Result<ScanResults<'a, 'r>, ScanError> {
+        #[cfg(feature = "rules-profiling")]
+        {
+            self.scan_context_mut().current_label = None;
+        }
         self.scan_impl(data.try_into()?, None)
     }
 
@@ -312,15 +316,26 @@ impl<'r> Scanner<'r> {
     where
         P: AsRef<Path>,
     {
-        self.scan_impl(self.load_file(target.as_ref())?, None)
+        let target_path = target.as_ref();
+        #[cfg(feature = "rules-profiling")]
+        {
+            let label = target_path.to_string_lossy().into_owned();
+            self.scan_context_mut().current_label = Some(label);
+        }
+        let data = self.load_file(target_path)?;
+        self.scan_impl(data, None)
     }
 
     /// Like [`Scanner::scan`], but allows to specify additional scan options.
     pub fn scan_with_options<'a, 'opts>(
         &'a mut self,
         data: &'a [u8],
-        options: ScanOptions<'opts>,
+        #[allow(unused_mut)] mut options: ScanOptions<'opts>,
     ) -> Result<ScanResults<'a, 'r>, ScanError> {
+        #[cfg(feature = "rules-profiling")]
+        {
+            self.scan_context_mut().current_label = options.label.take();
+        }
         self.scan_impl(ScannedData::Slice(data), Some(options))
     }
 
@@ -329,12 +344,23 @@ impl<'r> Scanner<'r> {
     pub fn scan_file_with_options<'opts, P>(
         &mut self,
         target: P,
-        options: ScanOptions<'opts>,
+        #[allow(unused_mut)] mut options: ScanOptions<'opts>,
     ) -> Result<ScanResults<'_, 'r>, ScanError>
     where
         P: AsRef<Path>,
     {
-        self.scan_impl(self.load_file(target.as_ref())?, Some(options))
+        let target_path = target.as_ref();
+        #[cfg(feature = "rules-profiling")]
+        {
+            // For file scans, the path always wins over any explicit label
+            // in `options`. We still drain `options.label` so it doesn't
+            // leak into the next scan if the same options were reused.
+            let _ = options.label.take();
+            let label = target_path.to_string_lossy().into_owned();
+            self.scan_context_mut().current_label = Some(label);
+        }
+        let data = self.load_file(target_path)?;
+        self.scan_impl(data, Some(options))
     }
 
     /// Sets the value of a global variable.
@@ -484,7 +510,6 @@ impl<'r> Scanner<'r> {
 }
 
 impl<'r> Scanner<'r> {
-    #[cfg(feature = "rules-profiling")]
     #[inline]
     fn scan_context<'a>(&self) -> &ScanContext<'r, 'a> {
         unsafe {
@@ -540,11 +565,11 @@ impl<'r> Scanner<'r> {
         Ok(data)
     }
 
-    fn scan_impl<'a, 'opts>(
+    fn scan_impl_inner<'a, 'opts>(
         &'a mut self,
         data: ScannedData<'a>,
         options: Option<ScanOptions<'opts>>,
-    ) -> Result<ScanResults<'a, 'r>, ScanError> {
+    ) -> Result<(), ScanError> {
         let ctx = self.scan_context_mut();
 
         // Clear information about matches found in a previous scan, if any.
@@ -669,7 +694,22 @@ impl<'r> Scanner<'r> {
 
         ctx.scan_state = ScanState::Finished(DataSnippets::SingleBlock(data));
 
-        Ok(ScanResults::new(ctx))
+        Ok(())
+    }
+
+    fn scan_impl<'a, 'opts>(
+        &'a mut self,
+        data: ScannedData<'a>,
+        options: Option<ScanOptions<'opts>>,
+    ) -> Result<ScanResults<'a, 'r>, ScanError> {
+        let inner_result = self.scan_impl_inner(data, options);
+
+        #[cfg(feature = "rules-profiling")]
+        self.scan_context_mut().record_scan_attribution();
+
+        inner_result?;
+
+        Ok(ScanResults::new(self.scan_context()))
     }
 }
 
