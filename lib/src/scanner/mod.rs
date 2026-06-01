@@ -498,6 +498,17 @@ impl<'r> Scanner<'r> {
         self.scan_context().slowest_rules(n)
     }
 
+    /// Returns up to `n` labeled scans that took the most total time across
+    /// all rules. Each entry is the sum of every rule's incremental time on
+    /// a single scan. Useful for identifying pathological input files.
+    ///
+    /// Like [`Scanner::slowest_rules`], the data is cumulative across scans;
+    /// use [`Scanner::clear_profiling_data`] to reset.
+    #[cfg(feature = "rules-profiling")]
+    pub fn slowest_files(&self, n: usize) -> Vec<FileTime> {
+        self.scan_context().slowest_files(n)
+    }
+
     /// Clears all accumulated profiling data.
     ///
     /// This method resets the profiling data collected during rule execution

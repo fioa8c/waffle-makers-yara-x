@@ -273,6 +273,17 @@ impl ScanContext<'_, '_> {
         result
     }
 
+    /// Returns up to `n` labeled scans that took the most cumulative time
+    /// across all rules. Does not modify internal state.
+    pub fn slowest_files(
+        &self,
+        n: usize,
+    ) -> Vec<crate::scanner::profiling::FileTime> {
+        let mut v = self.top_files.sorted_snapshot();
+        v.truncate(n);
+        v
+    }
+
     /// Clears profiling information.
     pub fn clear_profiling_data(&mut self) {
         self.time_spent_in_rule.fill(0);

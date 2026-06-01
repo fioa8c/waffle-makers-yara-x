@@ -933,3 +933,39 @@ fn rules_profiling_per_file_offenders() {
         assert!(w[0].time >= w[1].time);
     }
 }
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_slowest_files() {
+    let rules = crate::compile(
+        r#"
+    rule slow_a {
+      condition:
+        for any i in (0..100000) : (uint8(i % filesize) == 0xCC)
+    }
+    rule slow_b {
+      condition:
+        for any i in (0..100000) : (uint8(i % filesize) == 0xDD)
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    for (label, sz) in [("tiny", 16), ("big", 4096), ("medium", 512)] {
+        let opts = crate::ScanOptions::new().label(label);
+        scanner.scan_with_options(&vec![0u8; sz], opts).unwrap();
+    }
+
+    let files = scanner.slowest_files(10);
+    assert!(!files.is_empty());
+
+    // Sorted descending.
+    for w in files.windows(2) {
+        assert!(w[0].time >= w[1].time);
+    }
+
+    // "big" should be slowest.
+    assert_eq!(files[0].label, "big");
+}
