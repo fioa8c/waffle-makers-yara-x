@@ -433,7 +433,7 @@ fn profiling_lists_offender_files() {
             r#"
 rule slow_a {
   condition:
-    for any i in (0..200000) : (uint8(i % filesize) == 0xCC)
+    for any i in (0..2000000) : (uint8(i % filesize) == 0xCC)
 }
 "#,
         )
