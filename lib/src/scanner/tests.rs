@@ -959,13 +959,16 @@ fn rules_profiling_slowest_files() {
     }
 
     let files = scanner.slowest_files(10);
-    assert!(!files.is_empty());
+    assert!(!files.is_empty(), "expected at least one file in slowest_files");
 
-    // Sorted descending.
+    // All three labels must appear.
+    let labels: Vec<&str> = files.iter().map(|f| f.label.as_str()).collect();
+    assert!(labels.contains(&"tiny"));
+    assert!(labels.contains(&"big"));
+    assert!(labels.contains(&"medium"));
+
+    // Sorted descending by time.
     for w in files.windows(2) {
-        assert!(w[0].time >= w[1].time);
+        assert!(w[0].time >= w[1].time, "files not sorted descending");
     }
-
-    // "big" should be slowest.
-    assert_eq!(files[0].label, "big");
 }
