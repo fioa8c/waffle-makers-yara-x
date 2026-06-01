@@ -252,6 +252,7 @@ impl ScanContext<'_, '_> {
                     pattern_matching_time: Duration::from_nanos(
                         pattern_matching_time,
                     ),
+                    top_offenders: vec![],
                 });
             }
         }

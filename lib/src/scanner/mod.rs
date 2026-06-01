@@ -160,12 +160,20 @@ pub struct ProfilingData<'r> {
     pub condition_exec_time: Duration,
     /// Time spent matching the rule's patterns.
     pub pattern_matching_time: Duration,
+    /// Up to 10 scans where this rule consumed the most time, sorted
+    /// descending by `time`.
+    pub top_offenders: Vec<FileTime>,
 }
 
 /// Optional information for the scan operation.
 #[derive(Debug, Default)]
 pub struct ScanOptions<'a> {
     module_metadata: HashMap<&'a str, &'a [u8]>,
+    /// Optional label used by profiling to attribute per-scan time to a
+    /// human-readable identifier (e.g. a logical name for an in-memory
+    /// buffer). Ignored when the `rules-profiling` feature is disabled.
+    #[cfg(feature = "rules-profiling")]
+    pub(crate) label: Option<String>,
 }
 
 impl<'a> ScanOptions<'a> {
@@ -174,7 +182,11 @@ impl<'a> ScanOptions<'a> {
     ///
     /// Use other methods to add additional information.
     pub fn new() -> Self {
-        Self { module_metadata: Default::default() }
+        Self {
+            module_metadata: Default::default(),
+            #[cfg(feature = "rules-profiling")]
+            label: None,
+        }
     }
 
     /// Adds metadata for a YARA module.
@@ -184,6 +196,16 @@ impl<'a> ScanOptions<'a> {
         metadata: &'a [u8],
     ) -> Self {
         self.module_metadata.insert(module_name, metadata);
+        self
+    }
+
+    /// Provides a human-readable label for this scan.
+    ///
+    /// Used by profiling to attribute incremental time to a specific input.
+    /// Has no effect when the `rules-profiling` feature is disabled.
+    #[cfg(feature = "rules-profiling")]
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 }
