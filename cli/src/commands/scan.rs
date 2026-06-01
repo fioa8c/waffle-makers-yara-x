@@ -507,6 +507,32 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
                     r.condition_exec_time,
                     r.total_time
                 );
+                if !r.top_offenders.is_empty() {
+                    println!("  top offending files  :");
+                    for (idx, f) in r.top_offenders.iter().enumerate() {
+                        println!(
+                            "    {:>2}. {:<40} {:?}",
+                            idx + 1,
+                            f.label,
+                            f.time
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut files = slowest_files.lock().unwrap();
+        if !files.is_empty() {
+            files.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+            files.truncate(10);
+            println!("\n{}", "Slowest files:".paint(Red).bold());
+            for f in files.iter() {
+                println!(
+                    r#"
+* file                 : {}
+  TOTAL                : {:?}"#,
+                    f.label, f.total_time
+                );
             }
         }
     }
