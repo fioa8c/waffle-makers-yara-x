@@ -273,6 +273,65 @@ impl ScanContext<'_, '_> {
         self.time_spent_in_rule.fill(0);
         self.time_spent_in_pattern.clear();
     }
+
+    /// Records per-rule timing deltas for the just-completed scan against
+    /// `current_label`, then advances baselines so the next scan computes
+    /// fresh deltas. If `current_label` is `None`, only baselines are
+    /// advanced (scan is not attributed to any label).
+    pub fn record_scan_attribution(&mut self) {
+        // Always advance baselines, even when there is no label, so a
+        // subsequent labeled scan computes the right delta.
+        let label = self.current_label.take();
+
+        if let Some(label) = label {
+            // Sum of all per-rule deltas (condition + pattern matching)
+            // for the global slowest-files heap.
+            let mut total_for_scan: u64 = 0;
+
+            for (rule_id, rule) in
+                self.compiled_rules.rules().iter().enumerate()
+            {
+                let cond_delta = self.time_spent_in_rule[rule_id]
+                    - self.time_spent_in_rule_baseline[rule_id];
+
+                let mut pat_delta: u64 = 0;
+                for p in rule.patterns.iter() {
+                    let current = self
+                        .time_spent_in_pattern
+                        .get(&p.pattern_id)
+                        .copied()
+                        .unwrap_or(0);
+                    let baseline = self
+                        .time_spent_in_pattern_baseline
+                        .get(&p.pattern_id)
+                        .copied()
+                        .unwrap_or(0);
+                    pat_delta += current - baseline;
+                }
+
+                let rule_total = cond_delta + pat_delta;
+                if rule_total > 0 {
+                    self.top_offenders_per_rule[rule_id].insert(
+                        Duration::from_nanos(rule_total),
+                        label.clone(),
+                    );
+                }
+                total_for_scan += rule_total;
+            }
+
+            if total_for_scan > 0 {
+                self.top_files
+                    .insert(Duration::from_nanos(total_for_scan), label);
+            }
+        }
+
+        // Advance baselines to match the current counter values.
+        self.time_spent_in_rule_baseline
+            .copy_from_slice(&self.time_spent_in_rule);
+        for (pid, t) in self.time_spent_in_pattern.iter() {
+            self.time_spent_in_pattern_baseline.insert(*pid, *t);
+        }
+    }
 }
 
 impl ScanContext<'_, '_> {

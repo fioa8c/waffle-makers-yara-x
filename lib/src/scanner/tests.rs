@@ -887,3 +887,46 @@ fn rules_profiling() {
     let slowest_rules = scanner.slowest_rules(10);
     assert_eq!(slowest_rules.len(), 0);
 }
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_per_file_offenders() {
+    let rules = crate::compile(
+        r#"
+    rule slow {
+      condition:
+        for any i in (0..200000) : (
+           uint8(i % filesize) == 0xCC
+        )
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    // Three scans with distinct labels.
+    let opts_a = crate::ScanOptions::new().label("fast");
+    scanner.scan_with_options(b"a", opts_a).unwrap();
+
+    let opts_b = crate::ScanOptions::new().label("slow");
+    scanner.scan_with_options(&vec![0u8; 4096], opts_b).unwrap();
+
+    let opts_c = crate::ScanOptions::new().label("medium");
+    scanner.scan_with_options(&vec![0u8; 1024], opts_c).unwrap();
+
+    let slowest = scanner.slowest_rules(1);
+    assert_eq!(slowest.len(), 1);
+
+    let offender_labels: Vec<&str> =
+        slowest[0].top_offenders.iter().map(|f| f.label.as_str()).collect();
+
+    assert!(offender_labels.contains(&"fast"));
+    assert!(offender_labels.contains(&"slow"));
+    assert!(offender_labels.contains(&"medium"));
+
+    // Sorted descending by time.
+    for w in slowest[0].top_offenders.windows(2) {
+        assert!(w[0].time >= w[1].time);
+    }
+}
