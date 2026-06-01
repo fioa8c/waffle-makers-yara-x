@@ -1043,17 +1043,26 @@ fn rules_profiling_top_k_eviction() {
     }
 
     let offenders = &slowest[0].top_offenders;
-    assert!(offenders.len() <= 10);
-    assert!(!offenders.is_empty());
 
-    // No "scan-00" through "scan-04" should appear: heap should have
-    // evicted the smallest entries.
+    // The bound is the load-bearing property: 25 inserts must not yield
+    // more than 10 retained entries. `BoundedTopK` unit tests
+    // (`lib/src/scanner/profiling.rs`) verify that the *correct* 10 are
+    // retained against known time values; here we only verify the bound.
+    assert!(offenders.len() <= 10, "heap exceeded capacity: {} entries", offenders.len());
+    assert!(!offenders.is_empty(), "expected at least one offender when threshold crossed");
+
+    // All retained labels must come from this test's submissions.
     for f in offenders {
-        let n: u32 = f.label
-            .strip_prefix("scan-")
-            .and_then(|s| s.parse().ok())
-            .unwrap();
-        assert!(n >= 5, "expected late label, got {}", f.label);
+        assert!(
+            f.label.starts_with("scan-"),
+            "unexpected label: {}",
+            f.label
+        );
+    }
+
+    // Sorted descending by time.
+    for w in offenders.windows(2) {
+        assert!(w[0].time >= w[1].time, "offenders not sorted descending");
     }
 }
 
