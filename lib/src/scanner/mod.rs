@@ -40,6 +40,8 @@ pub(crate) use crate::scanner::matches::Match;
 
 mod context;
 mod matches;
+#[cfg(feature = "rules-profiling")]
+mod profiling;
 
 pub mod blocks;
 
