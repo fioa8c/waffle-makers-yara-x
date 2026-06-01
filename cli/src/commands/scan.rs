@@ -427,7 +427,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
                             r.total_time += incoming.total_time;
                             r.top_offenders.extend(incoming.top_offenders);
                             // Keep only the top 10 across threads.
-                            r.top_offenders.sort_by(|a, b| b.time.cmp(&a.time));
+                            r.top_offenders.sort_by_key(|f| std::cmp::Reverse(f.time));
                             r.top_offenders.truncate(10);
                         } else {
                             mer.push(incoming);
@@ -442,7 +442,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
                     // Trim to bound growth; final sort/truncate happens
                     // once after the walk.
                     if files.len() > 1000 {
-                        files.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+                        files.sort_by_key(|f| std::cmp::Reverse(f.total_time));
                         files.truncate(100);
                     }
                 }
@@ -491,7 +491,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
             );
         } else {
             // Sort by total time in descending order.
-            mer.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+            mer.sort_by_key(|r| std::cmp::Reverse(r.total_time));
             println!("\n{}", "Slowest rules:".paint(Red).bold());
             for r in mer.iter().take(10) {
                 println!(
@@ -523,7 +523,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
 
         let mut files = slowest_files.lock().unwrap();
         if !files.is_empty() {
-            files.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+            files.sort_by_key(|f| std::cmp::Reverse(f.total_time));
             files.truncate(10);
             println!("\n{}", "Slowest files:".paint(Red).bold());
             for f in files.iter() {
