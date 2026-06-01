@@ -208,7 +208,12 @@ impl ScanContext<'_, '_> {
     /// Returns the slowest N rules.
     ///
     /// Profiling has an accumulative effect. When the scanner is used for
-    /// scanning multiple files the times add up.
+    /// scanning multiple files the times add up. Each returned entry
+    /// includes up to 10 file labels (`top_offenders`) — the scans where
+    /// that rule consumed the most time.
+    ///
+    /// Calling this does not modify any internal state. To reset profiling
+    /// data use [`ScanContext::clear_profiling_data`].
     pub fn slowest_rules(&self, n: usize) -> Vec<ProfilingData<'_>> {
         debug_assert_eq!(
             self.compiled_rules.num_rules(),
@@ -217,8 +222,8 @@ impl ScanContext<'_, '_> {
 
         let mut result = Vec::with_capacity(self.compiled_rules.num_rules());
 
-        for (rule, condition_exec_time) in iter::zip(
-            self.compiled_rules.rules().iter(),
+        for ((rule_idx, rule), condition_exec_time) in iter::zip(
+            self.compiled_rules.rules().iter().enumerate(),
             self.time_spent_in_rule.iter(),
         ) {
             let mut pattern_matching_time = 0;
@@ -229,7 +234,7 @@ impl ScanContext<'_, '_> {
                 }
             }
 
-            // Don't track rules that took less 100ms.
+            // Don't track rules that took less than 100ms cumulative.
             if condition_exec_time + pattern_matching_time > 100_000_000 {
                 let namespace = self
                     .compiled_rules
@@ -237,7 +242,7 @@ impl ScanContext<'_, '_> {
                     .get(rule.namespace_ident_id)
                     .unwrap();
 
-                let rule = self
+                let rule_name = self
                     .compiled_rules
                     .ident_pool()
                     .get(rule.ident_id)
@@ -245,20 +250,19 @@ impl ScanContext<'_, '_> {
 
                 result.push(ProfilingData {
                     namespace,
-                    rule,
+                    rule: rule_name,
                     condition_exec_time: Duration::from_nanos(
                         *condition_exec_time,
                     ),
                     pattern_matching_time: Duration::from_nanos(
                         pattern_matching_time,
                     ),
-                    top_offenders: vec![],
+                    top_offenders: self.top_offenders_per_rule[rule_idx]
+                        .sorted_snapshot(),
                 });
             }
         }
 
-        // Sort the results by the time spent on each rule, in descending
-        // order.
         result.sort_by(|a, b| {
             let a_time = a.pattern_matching_time + a.condition_exec_time;
             let b_time = b.pattern_matching_time + b.condition_exec_time;
