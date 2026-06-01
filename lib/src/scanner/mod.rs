@@ -146,6 +146,9 @@ impl<'d, const N: usize> TryInto<ScannedData<'d>> for &'d [u8; N] {
     }
 }
 
+#[cfg(feature = "rules-profiling")]
+pub use crate::scanner::profiling::FileTime;
+
 /// Contains information about the time spent on a rule.
 #[cfg(feature = "rules-profiling")]
 pub struct ProfilingData<'r> {

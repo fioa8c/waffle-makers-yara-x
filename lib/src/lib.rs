@@ -65,6 +65,8 @@ pub use scanner::ModuleOutputs;
 pub use scanner::NonMatchingRules;
 #[cfg(feature = "rules-profiling")]
 pub use scanner::ProfilingData;
+#[cfg(feature = "rules-profiling")]
+pub use scanner::FileTime;
 pub use scanner::ScanError;
 pub use scanner::ScanOptions;
 pub use scanner::ScanResults;
