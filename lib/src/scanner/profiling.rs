@@ -57,12 +57,8 @@ impl BoundedTopK {
                 time: *time,
             })
             .collect();
-        v.sort_by(|a, b| b.time.cmp(&a.time));
+        v.sort_by_key(|f| std::cmp::Reverse(f.time));
         v
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.heap.is_empty()
     }
 }
 
