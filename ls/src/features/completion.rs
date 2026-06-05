@@ -18,7 +18,7 @@ use crate::utils::cst_traversal::{
     rule_containing_token, token_at_position,
 };
 
-use crate::utils::modules::{get_struct, ty_to_string};
+use crate::utils::modules::{get_type, ty_to_string};
 
 const PATTERN_MODS: &[(SyntaxKind, &[&str])] = &[
     (
@@ -380,7 +380,7 @@ fn field_suggestions(token: &Token<Immutable>) -> Option<Vec<CompletionItem>> {
         _ => None,
     }?;
 
-    let current_struct = match get_struct(&token)? {
+    let current_struct = match get_type(&token)? {
         Type::Struct(s) => s,
         _ => return None,
     };
@@ -399,14 +399,12 @@ fn field_suggestions(token: &Token<Immutable>) -> Option<Vec<CompletionItem>> {
                     .iter()
                     .map(|sig| {
                         let args = sig
-                            .args
-                            .iter()
+                            .args()
                             .map(|(name, ty)| format!("{}: {}", name, ty_to_string(ty)))
                             .collect::<Vec<_>>();
 
                         let args_template = sig
-                            .args
-                            .iter()
+                            .args()
                             .enumerate()
                             .map(|(n, (name, _))| {
                                 format!("${{{}:{name}}}", n + 1)
@@ -430,7 +428,7 @@ fn field_suggestions(token: &Token<Immutable>) -> Option<Vec<CompletionItem>> {
                                 description: Some(ty_to_string(&ty)),
                                 ..Default::default()
                             }),
-                            documentation: sig.description.as_ref().map(
+                            documentation: sig.doc().map(
                                 |docs| {
                                     async_lsp::lsp_types::Documentation::MarkupContent(
                                         async_lsp::lsp_types::MarkupContent {
@@ -438,11 +436,10 @@ fn field_suggestions(token: &Token<Immutable>) -> Option<Vec<CompletionItem>> {
                                             value: format!(
                                                 "## `{}({}) -> {}`\n\n{}",
                                                 name,
-                                                sig.args
-                                                    .iter()
+                                                sig.args()
                                                     .map(|(name, ty)| format!("{}: {}", name, ty_to_string(ty)))
                                                     .join(", "),
-                                                ty_to_string(&sig.ret),
+                                                ty_to_string(sig.ret_type()),
                                                 docs
                                             ),
                                         },

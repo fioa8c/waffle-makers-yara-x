@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Context;
 use clap::{Arg, ArgAction, ArgMatches, Command, arg, value_parser};
-use superconsole::{Component, Line, Lines, Span};
 use yansi::Color::{Green, Red, Yellow};
 use yansi::Paint;
 use yara_x::Patch;
@@ -18,6 +17,7 @@ use crate::commands::{
     compilation_args, compile_rules, path_with_namespace_parser,
 };
 use crate::config::Config;
+use crate::walk::Draw;
 use crate::walk::Message;
 use crate::{help, walk};
 
@@ -247,24 +247,13 @@ impl FixEncodingState {
     }
 }
 
-impl Component for FixEncodingState {
-    fn draw_unchecked(
-        &self,
-        _dimensions: superconsole::Dimensions,
-        mode: superconsole::DrawMode,
-    ) -> anyhow::Result<superconsole::Lines> {
-        let res = match mode {
-            superconsole::DrawMode::Normal | superconsole::DrawMode::Final => {
-                let modified = format!(
-                    "{} file(s) modified.",
-                    self.files_modified.load(Ordering::Relaxed)
-                );
+impl Draw for FixEncodingState {
+    fn draw(&self, _width: usize) -> String {
+        let modified = format!(
+            "{} file(s) modified.",
+            self.files_modified.load(Ordering::Relaxed)
+        );
 
-                Line::from_iter([Span::new_unstyled(
-                    modified.paint(Green).bold(),
-                )?])
-            }
-        };
-        Ok(Lines(vec![res]))
+        format!("{}", modified.paint(Green).bold())
     }
 }

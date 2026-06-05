@@ -12,21 +12,20 @@ use clap::{
 };
 use crossbeam::channel::Sender;
 use itertools::Itertools;
-use superconsole::style::Stylize;
-use superconsole::{Component, Line, Lines, Span};
-#[cfg(feature = "rules-profiling")]
-use yansi::Color::Green;
-use yansi::Color::{Cyan, Red, Yellow};
+use yansi::Color::{Cyan, Green, Red, Yellow};
 use yansi::Paint;
 
 use yara_x::errors::ScanError;
 use yara_x::{MetaValue, Patterns, Rule, Rules, ScanOptions, Scanner};
+#[cfg(feature = "rules-profiling")]
+use yara_x::FileTime;
 
 use crate::commands::{
     compilation_args, compile_rules, get_external_vars,
     meta_file_value_parser, path_with_namespace_parser,
     truncate_with_ellipsis,
 };
+use crate::walk::Draw;
 use crate::walk::Message;
 use crate::{help, walk};
 
@@ -136,6 +135,13 @@ struct ProfilingData {
     pub condition_exec_time: Duration,
     pub pattern_matching_time: Duration,
     pub total_time: Duration,
+    pub top_offenders: Vec<FileTime>,
+}
+
+#[cfg(feature = "rules-profiling")]
+struct FileProfilingData {
+    pub label: String,
+    pub total_time: Duration,
 }
 
 #[cfg(feature = "rules-profiling")]
@@ -148,7 +154,15 @@ impl From<yara_x::ProfilingData<'_>> for ProfilingData {
             pattern_matching_time: value.pattern_matching_time,
             total_time: value.condition_exec_time
                 + value.pattern_matching_time,
+            top_offenders: value.top_offenders,
         }
+    }
+}
+
+#[cfg(feature = "rules-profiling")]
+impl From<yara_x::FileTime> for FileProfilingData {
+    fn from(value: yara_x::FileTime) -> Self {
+        Self { label: value.label, total_time: value.time }
     }
 }
 
@@ -253,9 +267,6 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
 
         rules
     } else {
-        // With `take()` we pass the external variables to `compile_rules`,
-        // while leaving a `None` in `external_vars`. This way external
-        // variables are not set again in the scanner.
         compile_rules(rules_path, args, config)?
     };
 
@@ -309,6 +320,8 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
 
     #[cfg(feature = "rules-profiling")]
     let slowest_rules: Mutex<Vec<ProfilingData>> = Mutex::new(Vec::new());
+    #[cfg(feature = "rules-profiling")]
+    let slowest_files: Mutex<Vec<FileProfilingData>> = Mutex::new(Vec::new());
 
     w.walk(
         state,
@@ -410,20 +423,38 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
         |scanner, _| {
             #[cfg(feature = "rules-profiling")]
             if profiling {
-                let mut mer = slowest_rules.lock().unwrap();
-                for profiling_data in scanner.slowest_rules(1000) {
-                    if let Some(r) = mer.iter_mut().find(|r| {
-                        r.rule == profiling_data.rule
-                            && r.namespace == profiling_data.namespace
-                    }) {
-                        r.condition_exec_time +=
-                            profiling_data.condition_exec_time;
-                        r.pattern_matching_time +=
-                            profiling_data.pattern_matching_time;
-                        r.total_time += profiling_data.condition_exec_time
-                            + profiling_data.pattern_matching_time;
-                    } else {
-                        mer.push(profiling_data.into());
+                {
+                    let mut mer = slowest_rules.lock().unwrap();
+                    for profiling_data in scanner.slowest_rules(1000) {
+                        let incoming: ProfilingData = profiling_data.into();
+                        if let Some(r) = mer.iter_mut().find(|r| {
+                            r.rule == incoming.rule
+                                && r.namespace == incoming.namespace
+                        }) {
+                            r.condition_exec_time +=
+                                incoming.condition_exec_time;
+                            r.pattern_matching_time +=
+                                incoming.pattern_matching_time;
+                            r.total_time += incoming.total_time;
+                            r.top_offenders.extend(incoming.top_offenders);
+                            // Keep only the top 10 across threads.
+                            r.top_offenders.sort_by_key(|f| std::cmp::Reverse(f.time));
+                            r.top_offenders.truncate(10);
+                        } else {
+                            mer.push(incoming);
+                        }
+                    }
+                }
+                {
+                    let mut files = slowest_files.lock().unwrap();
+                    for ft in scanner.slowest_files(10) {
+                        files.push(ft.into());
+                    }
+                    // Trim to bound growth; final sort/truncate happens
+                    // once after the walk.
+                    if files.len() > 1000 {
+                        files.sort_by_key(|f| std::cmp::Reverse(f.total_time));
+                        files.truncate(100);
                     }
                 }
             }
@@ -471,7 +502,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
             );
         } else {
             // Sort by total time in descending order.
-            mer.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+            mer.sort_by_key(|r| std::cmp::Reverse(r.total_time));
             println!("\n{}", "Slowest rules:".paint(Red).bold());
             for r in mer.iter().take(10) {
                 println!(
@@ -486,6 +517,32 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
                     r.pattern_matching_time,
                     r.condition_exec_time,
                     r.total_time
+                );
+                if !r.top_offenders.is_empty() {
+                    println!("  top offending files  :");
+                    for (idx, f) in r.top_offenders.iter().enumerate() {
+                        println!(
+                            "    {:>2}. {:<40} {:?}",
+                            idx + 1,
+                            f.label,
+                            f.time
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut files = slowest_files.lock().unwrap();
+        if !files.is_empty() {
+            files.sort_by_key(|f| std::cmp::Reverse(f.total_time));
+            files.truncate(10);
+            println!("\n{}", "Slowest files:".paint(Red).bold());
+            for f in files.iter() {
+                println!(
+                    r#"
+* file                 : {}
+  TOTAL                : {:?}"#,
+                    f.label, f.total_time
                 );
             }
         }
@@ -528,17 +585,12 @@ fn replace_whitespace(path: &Path) -> Cow<'_, str> {
     s
 }
 
-impl Component for ScanState {
-    fn draw_unchecked(
-        &self,
-        dimensions: superconsole::Dimensions,
-        mode: superconsole::DrawMode,
-    ) -> anyhow::Result<Lines> {
-        let mut lines = Lines::new();
+impl Draw for ScanState {
+    fn draw(&self, width: usize) -> String {
+        let mut output = String::new();
 
-        lines.push(Line::from_iter([Span::new_unstyled(
-            "─".repeat(dimensions.width),
-        )?]));
+        output.push_str(&"─".repeat(width));
+        output.push('\n');
 
         let scanned = format!(
             " {} file(s) scanned in {:.1}s. ",
@@ -551,45 +603,39 @@ impl Component for ScanState {
 
         let matched = format!("{num_matching_files} file(s) matched.");
 
-        lines.push(Line::from_iter([
-            Span::new_unstyled(scanned)?,
-            Span::new_styled(if num_matching_files > 0 {
-                matched.red().bold()
-            } else {
-                matched.green().bold()
-            })?,
-        ]));
+        output.push_str(&scanned);
+        if num_matching_files > 0 {
+            output.push_str(&format!("{}", matched.paint(Red).bold()));
+        } else {
+            output.push_str(&format!("{}", matched.paint(Green).bold()));
+        }
+        output.push('\n');
 
-        if matches!(mode, superconsole::DrawMode::Normal) {
-            lines.push(Line::from_iter([Span::new_unstyled(
-                "╶".repeat(dimensions.width),
-            )?]));
+        output.push_str(&"╶".repeat(width));
+        output.push('\n');
 
-            for (file, start_time) in
-                self.files_in_progress.lock().unwrap().iter()
-            {
-                // The length of the elapsed time is 7 characters.
-                let max_path_with = dimensions.width.saturating_sub(7);
+        for (file, start_time) in self.files_in_progress.lock().unwrap().iter()
+        {
+            let max_path_with = width.saturating_sub(7);
 
-                let (path, path_width) = truncate_with_ellipsis(
-                    replace_whitespace(file),
-                    max_path_with,
-                );
+            let (path, path_width) = truncate_with_ellipsis(
+                replace_whitespace(file),
+                max_path_with,
+            );
 
-                let spaces =
-                    " ".repeat(max_path_with.saturating_sub(path_width));
+            let spaces = " ".repeat(max_path_with.saturating_sub(path_width));
 
-                let line = format!(
-                    "{}{}{:6.1}s",
-                    path,
-                    spaces,
-                    Instant::elapsed(start_time).as_secs_f32()
-                );
-                lines.push(Line::from_iter([Span::new_unstyled(line)?]))
-            }
+            let line = format!(
+                "{}{}{:6.1}s",
+                path,
+                spaces,
+                Instant::elapsed(start_time).as_secs_f32()
+            );
+            output.push_str(&line);
+            output.push('\n');
         }
 
-        Ok(lines)
+        output
     }
 }
 

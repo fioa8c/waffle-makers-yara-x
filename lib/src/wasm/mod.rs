@@ -99,8 +99,8 @@ use crate::types::{
 };
 use crate::wasm::integer::RangedInteger;
 use crate::wasm::runtime::{
-    AsContext, AsContextMut, Caller, Config, Engine, FuncType, Linker, ValRaw,
-    ValType,
+    AsContext, AsContextMut, Caller, Config, Engine, FuncType, Linker,
+    Trampoline, TrampolineResult, ValRaw, ValType,
 };
 use crate::wasm::string::RuntimeString;
 use crate::wasm::string::String as _;
@@ -227,12 +227,13 @@ impl WasmExport {
         // overloaded.
         for export in wasm_exports().filter(predicate) {
             let mangled_name = export.fully_qualified_mangled_name();
+            let description = export.description.clone();
             // If the function was already present in the map is because it has
             // multiple signatures. If that's the case, add more signatures to
             // the existing `Func` object.
             if let Some(function) = functions.get_mut(export.name) {
                 let mut signature = FuncSignature::from(mangled_name);
-                signature.description = export.description.clone();
+                signature.doc = description;
                 function.add_signature(signature);
             } else {
                 let mut func = Func::from(mangled_name);
@@ -243,7 +244,7 @@ impl WasmExport {
                 // Rc::get_mut because the Rc was just crated and there's a
                 // single reference to it.
                 let signature = Rc::get_mut(signature).unwrap();
-                signature.description = export.description.clone();
+                signature.doc = description;
                 functions.insert(export.name, func);
             }
         }
@@ -278,7 +279,7 @@ impl WasmExport {
 pub(crate) trait WasmExportedFn {
     /// Returns the function that will be passed to the selected runtime linker
     /// while linking the WASM code to this function.
-    fn trampoline(&'static self) -> TrampolineFn;
+    fn trampoline(&'static self) -> Trampoline<ScanContext<'static, 'static>>;
 
     /// Returns a [`Vec<ValType>`] with the types of the function's
     /// arguments
@@ -300,13 +301,6 @@ pub(crate) trait WasmExportedFn {
         self.wasmtime_results().iter().map(wasmtime_to_walrus).collect()
     }
 }
-
-type TrampolineFn = Box<
-    dyn Fn(Caller<'_, ScanContext>, &mut [ValRaw]) -> anyhow::Result<()>
-        + Send
-        + Sync
-        + 'static,
->;
 
 const MAX_RESULTS: usize = 4;
 type WasmResultArray<T> = SmallVec<[T; MAX_RESULTS]>;
@@ -688,11 +682,11 @@ macro_rules! impl_wasm_exported_fn {
             #[allow(unused_variables)]
             #[allow(non_snake_case)]
             #[allow(unused_mut)]
-            fn trampoline(&'static self) -> TrampolineFn {
+            fn trampoline(&'static self) -> Trampoline<ScanContext<'static, 'static>> {
                 Box::new(
                     |mut caller: Caller<'_, ScanContext>,
                      args_and_results: &mut [ValRaw]|
-                     -> anyhow::Result<()> {
+                     -> TrampolineResult {
                         let mut i = 0;
                         $(
                             let $args = args_and_results[i].raw_into(caller.data_mut());
@@ -706,7 +700,8 @@ macro_rules! impl_wasm_exported_fn {
                         let num_results = result_slice.len();
 
                         args_and_results[0..num_results].clone_from_slice(result_slice);
-                        anyhow::Ok(())
+
+                        TrampolineResult::Ok(())
                     },
                 )
             }
@@ -938,7 +933,9 @@ pub(crate) fn is_pat_match_at(
     if offset < 0 {
         return false;
     }
-    if let Some(matches) = caller.data().pattern_matches.get(pattern_id) {
+    if let Some(matches) =
+        caller.data().tracker.pattern_matches.get(pattern_id)
+    {
         matches.search(offset.try_into().unwrap()).is_ok()
     } else {
         false
@@ -957,7 +954,9 @@ pub(crate) fn is_pat_match_in(
     lower_bound: i64,
     upper_bound: i64,
 ) -> bool {
-    if let Some(matches) = caller.data().pattern_matches.get(pattern_id) {
+    if let Some(matches) =
+        caller.data().tracker.pattern_matches.get(pattern_id)
+    {
         matches
             .matches_in_range(lower_bound as isize..=upper_bound as isize)
             .is_positive()
@@ -991,6 +990,7 @@ pub(crate) fn pat_range_match(
 
     for pattern_id in range {
         let match_found = ctx
+            .tracker
             .pattern_matches
             .get(pattern_id.into())
             .is_some_and(|matches| matches.len() > 0);
@@ -1009,7 +1009,9 @@ pub(crate) fn pat_matches(
     caller: &mut Caller<'_, ScanContext>,
     pattern_id: PatternId,
 ) -> i64 {
-    if let Some(matches) = caller.data().pattern_matches.get(pattern_id) {
+    if let Some(matches) =
+        caller.data().tracker.pattern_matches.get(pattern_id)
+    {
         matches.len().try_into().unwrap()
     } else {
         0
@@ -1028,7 +1030,9 @@ pub(crate) fn pat_matches_in(
     lower_bound: i64,
     upper_bound: i64,
 ) -> i64 {
-    if let Some(matches) = caller.data().pattern_matches.get(pattern_id) {
+    if let Some(matches) =
+        caller.data().tracker.pattern_matches.get(pattern_id)
+    {
         matches.matches_in_range(lower_bound as isize..=upper_bound as isize)
     } else {
         0
@@ -1046,7 +1050,9 @@ pub(crate) fn pat_length(
     pattern_id: PatternId,
     index: i64,
 ) -> Option<i64> {
-    if let Some(matches) = caller.data().pattern_matches.get(pattern_id) {
+    if let Some(matches) =
+        caller.data().tracker.pattern_matches.get(pattern_id)
+    {
         let index: usize = index.try_into().ok()?;
         // Index is 1-based, convert it to 0-based before calling `matches.get`
         let m = matches.get(index.checked_sub(1)?)?;
@@ -1067,7 +1073,9 @@ pub(crate) fn pat_offset(
     pattern_id: PatternId,
     index: i64,
 ) -> Option<i64> {
-    if let Some(matches) = caller.data().pattern_matches.get(pattern_id) {
+    if let Some(matches) =
+        caller.data().tracker.pattern_matches.get(pattern_id)
+    {
         let index: usize = index.try_into().ok()?;
         // Index is 1-based, convert it to 0-based before calling `matches.get`
         let m = matches.get(index.checked_sub(1)?)?;
@@ -1140,7 +1148,8 @@ fn lookup_field(
 
     let mem_ptr = store_ctx
         .data_mut()
-        .wasm_main_memory
+        .wasm
+        .main_memory
         .unwrap()
         .data_ptr(&mut store_ctx);
 

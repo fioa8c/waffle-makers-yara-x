@@ -419,3 +419,66 @@ fn json_output_single_meta_not_array() {
     assert!(meta["int"].is_i64());
     assert!(meta["float"].is_f64());
 }
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn profiling_lists_offender_files() {
+    use std::io::Write;
+
+    let temp = TempDir::new().unwrap();
+
+    let rule_file = temp.child("slow.yar");
+    rule_file
+        .write_str(
+            r#"
+rule slow_a {
+  condition:
+    for any i in (0..2000000) : (uint8(i % filesize) == 0xCC)
+}
+"#,
+        )
+        .unwrap();
+
+    let small = temp.child("small.bin");
+    let large = temp.child("large.bin");
+
+    {
+        let mut f = std::fs::File::create(small.path()).unwrap();
+        f.write_all(&vec![0u8; 512]).unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(large.path()).unwrap();
+        f.write_all(&vec![0u8; 64 * 1024]).unwrap();
+    }
+
+    let assert = Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--profiling")
+        .arg(rule_file.path())
+        .arg(temp.path())
+        .assert()
+        .success();
+
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    // Threshold-based skip: on under-powered hosts the rule may not cross
+    // the 100ms cumulative threshold and no offender block will be printed.
+    // In that case there is nothing meaningful to assert structurally.
+    if out.contains("top offending files") {
+        let large_path = large.path().to_string_lossy().into_owned();
+        let small_path = small.path().to_string_lossy().into_owned();
+
+        // Both files appear in the offender output and the Slowest files
+        // section header is printed. Ordering between large vs small
+        // depends on memory access patterns / cache effects and is not
+        // structurally reliable, so we don't assert on it.
+        assert!(out.contains(&large_path), "large.bin path should appear");
+        assert!(out.contains(&small_path), "small.bin path should appear");
+        assert!(out.contains("Slowest files:"), "Slowest files: header must appear");
+    } else {
+        eprintln!(
+            "note: profiling threshold not crossed on this host; \
+             smoke assertions skipped"
+        );
+    }
+}

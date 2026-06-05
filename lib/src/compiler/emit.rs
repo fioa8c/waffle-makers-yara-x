@@ -1253,7 +1253,7 @@ fn emit_check_for_rule_match(
         LoadKind::I32_8 { kind: ZeroExtend },
         MemArg {
             align: size_of::<i8>() as u32,
-            offset: MATCHING_RULES_BITMAP_BASE as u32,
+            offset: MATCHING_RULES_BITMAP_BASE as u64,
         },
     );
 
@@ -1554,7 +1554,6 @@ fn emit_of_pattern_set_with_loop(
 
     let num_patterns = of.items.len();
     let mut patterns = of.items.iter();
-    let next_pattern_id = of.next_pattern_var;
 
     emit_for(
         ctx,
@@ -1569,8 +1568,8 @@ fn emit_of_pattern_set_with_loop(
         },
         // Before each iteration.
         |ctx, instr, i| {
-            // Get the i-th pattern ID, and store it in `next_pattern_id`.
-            set_var(ctx, instr, next_pattern_id, |ctx, instr| {
+            // Get the i-th pattern ID, and store it in `of.for_vars.item`.
+            set_var(ctx, instr, of.for_vars.item, |ctx, instr| {
                 load_var(ctx, instr, i);
                 emit_switch(ctx, I64, instr, |ctx, instr| {
                     if let Some(pattern) = patterns.next() {
@@ -1584,7 +1583,7 @@ fn emit_of_pattern_set_with_loop(
         // Body
         |ctx, instr| {
             // Push the pattern ID into the stack.
-            load_var(ctx, instr, next_pattern_id);
+            load_var(ctx, instr, of.for_vars.item);
             // load_var returns an I64, convert it to I32.
             instr.unop(UnaryOp::I32WrapI64);
 
@@ -1621,7 +1620,6 @@ fn emit_of_expr_tuple(
 ) {
     let num_expressions = of.items.len();
     let mut expressions = of.items.iter();
-    let next_item = of.next_expr_var;
 
     emit_for(
         ctx,
@@ -1636,12 +1634,12 @@ fn emit_of_expr_tuple(
         },
         // Before each iteration.
         |ctx, instr, i| {
-            // Execute the i-th expression and save its result in `next_item`.
-            set_var(ctx, instr, next_item, |ctx, instr| {
+            // Execute the i-th expression and save its result in `of.for_vars.item`.
+            set_var(ctx, instr, of.for_vars.item, |ctx, instr| {
                 load_var(ctx, instr, i);
                 emit_switch(
                     ctx,
-                    next_item.ty().into(),
+                    of.for_vars.item.ty().into(),
                     instr,
                     |ctx, instr| {
                         if let Some(expr) = expressions.next() {
@@ -1655,7 +1653,7 @@ fn emit_of_expr_tuple(
         },
         // Body.
         |ctx, instr| {
-            load_var(ctx, instr, next_item);
+            load_var(ctx, instr, of.for_vars.item);
         },
         // After each iteration.
         |_, _, _| {},
@@ -1671,7 +1669,6 @@ fn emit_for_of_pattern_set(
 ) {
     let num_patterns = for_of.pattern_set.len();
     let mut patterns = for_of.pattern_set.iter();
-    let next_pattern_id = for_of.variable;
 
     emit_for(
         ctx,
@@ -1686,8 +1683,8 @@ fn emit_for_of_pattern_set(
         },
         // Before each iteration.
         |ctx, instr, i| {
-            // Get the i-th pattern ID, and store it in `next_pattern_id`.
-            set_var(ctx, instr, next_pattern_id, |ctx, instr| {
+            // Get the i-th pattern ID, and store it in `for_of.for_vars.item`.
+            set_var(ctx, instr, for_of.for_vars.item, |ctx, instr| {
                 load_var(ctx, instr, i);
                 emit_switch(ctx, I64, instr, |ctx, instr| {
                     if let Some(pattern) = patterns.next() {
@@ -1822,13 +1819,9 @@ fn emit_for_in_array(
     // The only variable contains the loop's next item.
     let next_item = for_in.variables[0];
 
-    // The variable `array_var` will hold a reference to the array being
-    // iterated.
-    let array_var = for_in.iterable_var;
-
     // Emit the expression that returns the array and stores a reference to
-    // it in `array_var`.
-    set_var(ctx, instr, array_var, |ctx, instr| {
+    // it in `for_in.for_vars.item`.
+    set_var(ctx, instr, for_in.for_vars.item, |ctx, instr| {
         emit_expr(ctx, ir, expr, instr);
     });
 
@@ -1840,7 +1833,7 @@ fn emit_for_in_array(
         |ctx, instr, n, loop_end| {
             // Initialize `n` to the array's length.
             set_var(ctx, instr, n, |ctx, instr| {
-                load_var(ctx, instr, array_var);
+                load_var(ctx, instr, for_in.for_vars.item);
                 instr.call(
                     ctx.function_id(wasm::export__array_len.mangled_name),
                 );
@@ -1864,7 +1857,7 @@ fn emit_for_in_array(
             // Get the i-th item in the array and store it in the
             // local variable `next_item`.
             set_var(ctx, instr, next_item, |ctx, instr| {
-                load_var(ctx, instr, array_var);
+                load_var(ctx, instr, for_in.for_vars.item);
                 load_var(ctx, instr, i);
                 emit_array_indexing(ctx, instr, &array);
             });
@@ -1894,13 +1887,9 @@ fn emit_for_in_map(
     let next_key = for_in.variables[0];
     let next_val = for_in.variables[1];
 
-    // The variable `map_var` will hold a reference to the array being
-    // iterated.
-    let map_var = for_in.iterable_var;
-
     // Emit the expression that returns the map and stores a reference to
-    // it in `map_var`.
-    set_var(ctx, instr, map_var, |ctx, instr| {
+    // it in `for_in.for_vars.item`.
+    set_var(ctx, instr, for_in.for_vars.item, |ctx, instr| {
         emit_expr(ctx, ir, expr, instr);
     });
 
@@ -1912,7 +1901,7 @@ fn emit_for_in_map(
         |ctx, instr, n, loop_end| {
             // Initialize `n` to the map's length.
             set_var(ctx, instr, n, |ctx, instr| {
-                load_var(ctx, instr, map_var);
+                load_var(ctx, instr, for_in.for_vars.item);
                 instr
                     .call(ctx.function_id(wasm::export__map_len.mangled_name));
             });
@@ -1933,7 +1922,7 @@ fn emit_for_in_map(
         // Before each iteration.
         |ctx, instr, i| {
             set_vars(ctx, instr, &[next_key, next_val], |ctx, instr| {
-                load_var(ctx, instr, map_var);
+                load_var(ctx, instr, for_in.for_vars.item);
                 load_var(ctx, instr, i);
                 emit_map_lookup_by_index(ctx, instr, &map);
             });
@@ -2486,7 +2475,7 @@ fn set_var<B>(
     instr.store(
         ctx.wasm_symbols.main_memory,
         store_kind,
-        MemArg { align: alignment as u32, offset: VARS_STACK_START as u32 },
+        MemArg { align: alignment as u32, offset: VARS_STACK_START as u64 },
     );
 
     // Flag the variable as not undefined.
@@ -2531,7 +2520,7 @@ fn set_vars<B>(
                     StoreKind::I32 { atomic: false },
                     MemArg {
                         align: size_of::<i32>() as u32,
-                        offset: VARS_STACK_START as u32,
+                        offset: VARS_STACK_START as u64,
                     },
                 );
             }
@@ -2549,7 +2538,7 @@ fn set_vars<B>(
                     StoreKind::I64 { atomic: false },
                     MemArg {
                         align: size_of::<i64>() as u32,
-                        offset: VARS_STACK_START as u32,
+                        offset: VARS_STACK_START as u64,
                     },
                 );
             }
@@ -2562,7 +2551,7 @@ fn set_vars<B>(
                     StoreKind::F64,
                     MemArg {
                         align: size_of::<f64>() as u32,
-                        offset: VARS_STACK_START as u32,
+                        offset: VARS_STACK_START as u64,
                     },
                 );
             }
@@ -2607,7 +2596,7 @@ fn load_var(ctx: &mut EmitContext, instr: &mut InstrSeqBuilder, var: Var) {
     instr.load(
         ctx.wasm_symbols.main_memory,
         load_kind,
-        MemArg { align: alignment as u32, offset: VARS_STACK_START as u32 },
+        MemArg { align: alignment as u32, offset: VARS_STACK_START as u64 },
     );
 }
 
@@ -2796,7 +2785,7 @@ fn emit_lookup_common(ctx: &mut EmitContext, instr: &mut InstrSeqBuilder) {
             StoreKind::I32 { atomic: false },
             MemArg {
                 align: size_of::<i32>() as u32,
-                offset: LOOKUP_INDEXES_START as u32,
+                offset: LOOKUP_INDEXES_START as u64,
             },
         );
     }

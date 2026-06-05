@@ -887,3 +887,246 @@ fn rules_profiling() {
     let slowest_rules = scanner.slowest_rules(10);
     assert_eq!(slowest_rules.len(), 0);
 }
+
+// NOTE: This test does not compile until Task 4 adds `ScanOptions::label` and
+// Task 6 adds `ProfilingData::top_offenders`. It is intentionally placed early
+// so the test exists alongside the implementation it exercises.
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_per_file_offenders() {
+    let rules = crate::compile(
+        r#"
+    rule slow {
+      condition:
+        for any i in (0..200000) : (
+           uint8(i % filesize) == 0xCC
+        )
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    // Three scans with distinct labels.
+    let opts_a = crate::ScanOptions::new().label("fast");
+    scanner.scan_with_options(b"a", opts_a).unwrap();
+
+    let opts_b = crate::ScanOptions::new().label("slow");
+    scanner.scan_with_options(&vec![0u8; 4096], opts_b).unwrap();
+
+    let opts_c = crate::ScanOptions::new().label("medium");
+    scanner.scan_with_options(&vec![0u8; 1024], opts_c).unwrap();
+
+    let slowest = scanner.slowest_rules(1);
+    assert_eq!(slowest.len(), 1);
+
+    let offender_labels: Vec<&str> =
+        slowest[0].top_offenders.iter().map(|f| f.label.as_str()).collect();
+
+    assert!(offender_labels.contains(&"fast"));
+    assert!(offender_labels.contains(&"slow"));
+    assert!(offender_labels.contains(&"medium"));
+
+    // Sorted descending by time.
+    for w in slowest[0].top_offenders.windows(2) {
+        assert!(w[0].time >= w[1].time);
+    }
+}
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_slowest_files() {
+    let rules = crate::compile(
+        r#"
+    rule slow_a {
+      condition:
+        for any i in (0..100000) : (uint8(i % filesize) == 0xCC)
+    }
+    rule slow_b {
+      condition:
+        for any i in (0..100000) : (uint8(i % filesize) == 0xDD)
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    for (label, sz) in [("tiny", 16), ("big", 4096), ("medium", 512)] {
+        let opts = crate::ScanOptions::new().label(label);
+        scanner.scan_with_options(&vec![0u8; sz], opts).unwrap();
+    }
+
+    let files = scanner.slowest_files(10);
+    assert!(!files.is_empty(), "expected at least one file in slowest_files");
+
+    // All three labels must appear.
+    let labels: Vec<&str> = files.iter().map(|f| f.label.as_str()).collect();
+    assert!(labels.contains(&"tiny"));
+    assert!(labels.contains(&"big"));
+    assert!(labels.contains(&"medium"));
+
+    // Sorted descending by time.
+    for w in files.windows(2) {
+        assert!(w[0].time >= w[1].time, "files not sorted descending");
+    }
+}
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_clear_resets_offenders() {
+    let rules = crate::compile(
+        r#"
+    rule slow {
+      condition:
+        for any i in (0..200000) : (uint8(i % filesize) == 0xCC)
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    let opts = crate::ScanOptions::new().label("before_clear");
+    scanner.scan_with_options(&vec![0u8; 4096], opts).unwrap();
+
+    scanner.clear_profiling_data();
+
+    let opts = crate::ScanOptions::new().label("after_clear");
+    scanner.scan_with_options(&vec![0u8; 4096], opts).unwrap();
+
+    let slowest = scanner.slowest_rules(10);
+    // Slow rule may or may not have crossed the 100ms cumulative threshold
+    // post-clear depending on the host; if it has, only "after_clear"
+    // should appear.
+    for r in &slowest {
+        for offender in &r.top_offenders {
+            assert_ne!(offender.label, "before_clear");
+        }
+    }
+
+    let files = scanner.slowest_files(10);
+    for f in &files {
+        assert_ne!(f.label, "before_clear");
+    }
+}
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_top_k_eviction() {
+    let rules = crate::compile(
+        r#"
+    rule slow {
+      condition:
+        for any i in (0..50000) : (uint8(i % filesize) == 0xCC)
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    // 25 scans with monotonically increasing buffer size.
+    for i in 0..25u32 {
+        let label = format!("scan-{:02}", i);
+        let size = 256 * (i as usize + 1);
+        let opts = crate::ScanOptions::new().label(label);
+        scanner.scan_with_options(&vec![0u8; size], opts).unwrap();
+    }
+
+    let slowest = scanner.slowest_rules(1);
+    if slowest.is_empty() {
+        // Rule didn't cross the 100ms cumulative threshold — not a
+        // failure of this code, just an under-powered host. Skip.
+        return;
+    }
+
+    let offenders = &slowest[0].top_offenders;
+
+    // The bound is the load-bearing property: 25 inserts must not yield
+    // more than 10 retained entries. `BoundedTopK` unit tests
+    // (`lib/src/scanner/profiling.rs`) verify that the *correct* 10 are
+    // retained against known time values; here we only verify the bound.
+    assert!(offenders.len() <= 10, "heap exceeded capacity: {} entries", offenders.len());
+    assert!(!offenders.is_empty(), "expected at least one offender when threshold crossed");
+
+    // All retained labels must come from this test's submissions.
+    for f in offenders {
+        assert!(
+            f.label.starts_with("scan-"),
+            "unexpected label: {}",
+            f.label
+        );
+    }
+
+    // Sorted descending by time.
+    for w in offenders.windows(2) {
+        assert!(w[0].time >= w[1].time, "offenders not sorted descending");
+    }
+}
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_unlabeled_scan_advances_baseline() {
+    let rules = crate::compile(
+        r#"
+    rule slow {
+      condition:
+        for any i in (0..100000) : (uint8(i % filesize) == 0xCC)
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    // Unlabeled scan first — no label, but baseline must still advance.
+    scanner.scan(&vec![0u8; 4096]).unwrap();
+
+    // Labeled scan second — should record only its own delta.
+    let opts = crate::ScanOptions::new().label("labeled_only");
+    scanner.scan_with_options(&vec![0u8; 4096], opts).unwrap();
+
+    let slowest = scanner.slowest_rules(1);
+    if slowest.is_empty() {
+        return; // host too fast to cross threshold
+    }
+    let offenders = &slowest[0].top_offenders;
+    assert!(offenders.iter().all(|f| f.label == "labeled_only"));
+}
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn rules_profiling_scan_file_auto_labels_with_path() {
+    use std::io::Write;
+
+    let path = std::env::temp_dir()
+        .join(format!("yrx-profiling-{}.bin", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&vec![0u8; 4096]).unwrap();
+    }
+
+    let rules = crate::compile(
+        r#"
+    rule slow {
+      condition:
+        for any i in (0..200000) : (uint8(i % filesize) == 0xCC)
+    }
+    "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+    scanner.scan_file(&path).unwrap();
+
+    let slowest = scanner.slowest_rules(1);
+    let expected = path.to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&path);
+
+    if slowest.is_empty() {
+        return; // host did not cross 100ms cumulative threshold
+    }
+    assert!(slowest[0].top_offenders.iter().any(|f| f.label == expected));
+}

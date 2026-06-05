@@ -10,7 +10,11 @@ use anyhow::{Context, bail};
 use crossbeam::channel::{RecvTimeoutError, SendError, Sender};
 use crossterm::tty::IsTty;
 use globwalk::FileType;
-use superconsole::{Component, Lines, SuperConsole};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
+pub trait Draw {
+    fn draw(&self, width: usize) -> String;
+}
 
 /// Walks the files in a directory or a text file containing file paths,
 /// running a given function for each file.
@@ -273,7 +277,7 @@ impl<'a> Walker<'a> {
 /// <br>
 ///
 /// The function receives four arguments: the file's path, a state of some
-/// type `S` that implements the [`Component`] trait, an output channel that
+/// type `S` that implements the [`Draw`] trait, an output channel that
 /// the function can use for writing messages to the console (its type is
 /// &[`Sender<Message>`]), and a mutable reference to some type `T` returned
 /// by the thread initialization function.
@@ -308,7 +312,7 @@ impl<'a> Walker<'a> {
 ///
 /// walker.walk(
 ///     // The initial state. This must have some type `S` that implements the
-///     // `Component` trait.
+///     // `Draw` trait.
 ///     state
 ///     // This is the thread initialization function. This is called once
 ///     // per thread, and each thread will own the value returned by this
@@ -405,7 +409,7 @@ impl<'a> ParWalker<'a> {
         error: E,
     ) -> thread::Result<S>
     where
-        S: Component + Debug + Send + Sync + 'static,
+        S: Draw + Debug + Send + Sync + 'static,
         I: Fn(&S, &Sender<Message>) -> T + Send + Copy + Sync,
         A: Fn(&S, &Sender<Message>, PathBuf, &mut T) -> anyhow::Result<()>
             + Send
@@ -497,22 +501,24 @@ impl<'a> ParWalker<'a> {
                 }
             }));
 
-            let mut console = if cfg!(feature = "logging") {
+            // `multi_progress` will be `None` if the `logging` feature is
+            // enabled or if either stdout or stderr is not a tty (for example
+            // when any of them are redirected to a file).
+            let multi_progress = if cfg!(feature = "logging") {
                 None
+            } else if io::stdout().is_tty() {
+                Some(MultiProgress::new())
             } else {
-                // `console` will be `None` if either stdout or stderr is not a tty
-                // (for example when any of them are redirected to a file).
-                if io::stdout().is_tty() { SuperConsole::new() } else { None }
+                None
             };
 
-            // The console is rendered once every `render_period`.
             let render_period = Duration::from_secs_f64(0.150);
 
             output_messages(
                 render_period,
                 Instant::now(),
                 msg_recv,
-                console.as_mut(),
+                multi_progress.as_ref(),
                 state.clone(),
             );
 
@@ -523,18 +529,15 @@ impl<'a> ParWalker<'a> {
 
             let handle = {
                 let state = state.clone();
+                let multi_progress = multi_progress.clone();
                 thread::spawn(move || {
                     output_messages(
                         render_period,
                         Instant::now(),
                         msg_recv,
-                        console.as_mut(),
+                        multi_progress.as_ref(),
                         state.clone(),
                     );
-
-                    if let Some(console) = console {
-                        console.finalize(state.as_ref()).unwrap();
-                    }
                 })
             };
 
@@ -544,7 +547,7 @@ impl<'a> ParWalker<'a> {
             // close the channel *before* joining the thread (`handle.join()`)
             // this sends a signal through the channel to the listening threads to disconnect
             // otherwise, trying to `handle.join()` will cause a deadlock
-            std::mem::drop(msg_send);
+            drop(msg_send);
 
             handle.join().unwrap();
 
@@ -557,30 +560,32 @@ fn output_messages<S>(
     render_period: Duration,
     last_render: Instant,
     msg_recv: crossbeam::channel::Receiver<Message>,
-    console: Option<&mut SuperConsole>,
+    multi_progress: Option<&MultiProgress>,
     state: Arc<S>,
 ) where
-    S: Component,
+    S: Draw,
 {
-    let mut console = console;
     let mut last_render = last_render;
+    let pb = multi_progress.map(|mp| {
+        let pb = mp.add(ProgressBar::new_spinner());
+        pb.set_style(
+            ProgressStyle::default_spinner().template("{msg}").unwrap(),
+        );
+        pb
+    });
 
     loop {
         match msg_recv.recv_timeout(render_period) {
             Ok(Message::Info(s)) => {
-                if let Some(console) = console.as_mut() {
-                    console.emit(Lines::from_colored_multiline_string(
-                        s.as_str(),
-                    ));
+                if let Some(mp) = multi_progress {
+                    let _ = mp.println(s);
                 } else {
                     println!("{s}")
                 }
             }
             Ok(Message::Error(s)) => {
-                if let Some(console) = console.as_mut() {
-                    console.emit(Lines::from_colored_multiline_string(
-                        s.as_str(),
-                    ));
+                if let Some(mp) = multi_progress {
+                    let _ = mp.println(s);
                 } else {
                     eprintln!("{s}")
                 }
@@ -594,12 +599,19 @@ fn output_messages<S>(
             Err(RecvTimeoutError::Timeout) => {}
         }
 
-        if let Some(console) = console.as_mut()
+        if let Some(pb) = &pb
             && Instant::elapsed(&last_render) > render_period
         {
-            console.render(state.as_ref()).unwrap();
+            let width = crossterm::terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80);
+            pb.set_message(state.draw(width));
             last_render = Instant::now();
         }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 }
 

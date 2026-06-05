@@ -35,6 +35,12 @@ def test_invalid_rule_name_regexp():
     compiler.allowed_rule_name("(AXS|ERS")
 
 
+def test_invalid_allowed_metadata_regexp():
+  compiler = yara_x.Compiler()
+  with pytest.raises(ValueError):
+    compiler.allowed_metadata('author', yara_x.MetaType.STRING, regexp='(AXS|ERS')
+
+
 def test_int_globals():
   compiler = yara_x.Compiler()
   compiler.define_global('some_int', 1)
@@ -272,6 +278,14 @@ def test_serialization():
   rules = yara_x.Rules.deserialize_from(f)
   assert len(rules.scan(b'').matching_rules) == 1
 
+def test_deserialize_from_bad_reader_raises_ioerror():
+  class BadReader:
+    def read(self, n):
+      return 123
+
+  with pytest.raises(OSError):
+    yara_x.Rules.deserialize_from(BadReader())
+
 
 def tests_compiler_errors():
   compiler = yara_x.Compiler()
@@ -346,6 +360,20 @@ def test_format():
   assert result == expected_output
 
 
+def test_format_non_ascii_long():
+  import io
+  # Create a long string with non-ASCII characters.
+  # 5000 characters of 'ê' will be 10000 bytes.
+  rule_content = 'rule test { strings: $a = "' + 'ê' * 5000 + '" condition: $a }'
+  inp = io.StringIO(rule_content)
+  output = io.StringIO()
+  fmt = yara_x.Formatter()
+  # This should not raise "ValueError: read error: failed to write whole buffer"
+  fmt.format(inp, output)
+  result = output.getvalue()
+  assert 'ê' * 5000 in result
+
+
 def test_module():
   with pytest.raises(ValueError):
     yara_x.Module('AXS')
@@ -367,6 +395,14 @@ def test_compiler_disables_includes():
   with pytest.raises(yara_x.CompileError,
                      match="include statements not allowed"):
     compiler.add_source(f'include "foo.yar"\nrule main {{ condition: true }}')
+
+
+def test_compiler_max_warnings():
+  compiler = yara_x.Compiler()
+  compiler.max_warnings(1)
+  compiler.add_source(
+      'rule test1 { condition: true } rule test2 { condition: true }')
+  assert len(compiler.warnings()) == 1
 
 
 def test_rules_iterator():
