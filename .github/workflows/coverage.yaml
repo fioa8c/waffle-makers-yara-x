@@ -36,6 +36,11 @@ jobs:
 
     - name: Generate code coverage
       run: cargo llvm-cov --features=magic-module,rules-profiling --workspace --lib --lcov --output-path lcov.info
+    
+    - name: Import Codecov GPG key
+      run: |
+        gpg --keyserver hkps://keys.openpgp.org --recv-keys 27034E7FDB850E0BBC2C62FF806BB28AED779869 || \
+        gpg --keyserver keyserver.ubuntu.com --recv-keys 27034E7FDB850E0BBC2C62FF806BB28AED779869
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@0565863a31f2c772f9f0395002a31e3f06189574  # v5.4.0
