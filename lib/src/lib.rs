@@ -80,6 +80,7 @@ mod re;
 mod scanner;
 mod string_pool;
 mod symbols;
+mod teddy;
 mod types;
 mod variables;
 mod wasm;

@@ -66,12 +66,6 @@ generate-proto-code = [
 # This feature is disabled by default.
 generate-module-docs = ["protoc"]
 
-# Uses the `inventory` crate (https://github.com/dtolnay/inventory) instead
-# of `linkme` (https://github.com/dtolnay/linkme) for tracking WASM exports.
-#
-# This feature is disabled by default.
-inventory = ["dep:inventory"]
-
 # Whether to use protoc for parsing and compiling .proto files. By default,
 # .proto files are parsed and compiled by the pure-Rust compiler implemented
 # by the `protobuf_codegen` crate. With this feature you can change this
@@ -79,13 +73,6 @@ inventory = ["dep:inventory"]
 # to have protoc installed in your system, together with the protoc-gen-rust
 # plugin. Follow the instructions in: https://lib.rs/crates/protobuf-codegen3
 protoc = []
-
-# Uses the `linkme` crate (https://github.com/dtolnay/linkme) instead
-# of `inventory`  (https://github.com/dtolnay/inventory) for tracking WASM
-# exports.
-#
-# This feature is enabled by default.
-linkme = ["dep:linkme"]
 
 # Enables debug logs.
 logging = ["dep:log", "dep:quanta"]
@@ -109,6 +96,21 @@ native-code-serialization = []
 #
 # This feature is disabled by default.
 parallel-compilation = ["wasmtime/parallel-compilation"]
+
+# Enables the use of wasmtime's Pulley bytecode interpreter instead of the 
+# default Cranelift JIT compiler.
+#
+# When using Cranelift JIT, WebAssembly code generated from rule conditions is
+# compiled directly to native host machine instructions at runtime. This yields
+# maximum execution performance but requires executable memory pages (which may
+# be restricted in sandbox/secure environments) and is limited to architectures
+# natively supported by Cranelift.
+#
+# Enabling the `pulley` feature tells wasmtime to interpret the conditions using
+# the portable Pulley bytecode instruction virtual machine instead. This 
+# eliminates JIT memory constraints, improves compilation overhead, and provides
+# broad portability across architectures.
+pulley = ["wasmtime/pulley"]
 
 # Enables rules profiling. When this is enabled together with `logging` the
 # logs will contain information about the most expensive rules after each
@@ -259,21 +261,20 @@ default = [
     "exact-atoms",
     "fast-regexp",
     "generate-proto-code",
-    "inventory",
 ]
 
 [dependencies]
-aho-corasick = { workspace = true, features = ["logging"] }
 annotate-snippets = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 bincode = { workspace = true, features = ["serde"] }
 bitflags = { workspace = true, features = ["serde"] }
-bitvec = { workspace = true }
+bitvec = { workspace = true, features = ["serde"] }
 bstr = { workspace = true, features = ["serde"] }
 const-oid = { workspace = true, optional = true, features = ["db"] }
 crc32fast = { workspace = true, optional = true }
+daachorse = { workspace = true }
 der-parser = { workspace = true, optional = true, features = ["bigint"] }
 digest = { workspace = true, optional = true }
 dsa = { workspace = true, optional = true }
@@ -281,10 +282,9 @@ ecdsa = { workspace = true, optional = true }
 memmap2 = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 intaglio = { workspace = true }
-inventory = { workspace = true, optional = true }
+inventory = { workspace = true }
 ipnet = { workspace = true, optional = true }
 itertools = { workspace = true }
-linkme = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 md2 = { workspace = true, optional = true, features = ["oid"] }
 md-5 = { workspace = true, optional = true, features = ["oid"] }
@@ -317,8 +317,9 @@ x509-parser = { workspace = true, optional = true }
 yara-x-macros = { workspace = true }
 yara-x-parser = { workspace = true, features = ["serde"] }
 zip = { workspace = true, optional = true, features = ["deflate"] }
-simd-adler32 = {workspace = true, optional = true}
-simd_cesu8 = {workspace = true, optional = true}
+simd-adler32 = { workspace = true, optional = true }
+simd_cesu8 = { workspace = true, optional = true }
+
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 wasmtime = { workspace = true, default-features = false, features = [
@@ -343,6 +344,7 @@ protobuf-parse = { workspace = true, optional = true }
 yara-x-proto = { workspace = true, optional = true }
 
 [dev-dependencies]
+criterion = "0.5"
 globwalk = { workspace = true }
 goldenfile = { workspace = true }
 ihex = { workspace = true }
@@ -350,3 +352,11 @@ pretty_assertions = { workspace = true }
 rayon = { workspace = true }
 yara-x-proto-yaml = { workspace = true }
 zip = { workspace = true }
+
+[[bench]]
+name = "dex"
+harness = false
+
+[[bench]]
+name = "pe"
+harness = false

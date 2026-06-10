@@ -44,6 +44,10 @@ logging = ["dep:log", "dep:env_logger"]
 # performance.
 rules-profiling = ["yara-x/rules-profiling"]
 
+# Enables the use of wasmtime's Pulley bytecode interpreter instead of the default
+# Cranelift JIT compiler. See the documentation in the `yara-x` core library for details.
+pulley = ["yara-x/pulley"]
+
 [dependencies]
 anyhow = { workspace = true }
 ascii_tree = { workspace = true }
@@ -69,7 +73,7 @@ yara-x-proto-yaml = { workspace = true }
 yara-x-proto-json = { workspace = true }
 yara-x-fmt = { workspace = true }
 
-chardetng = "0.1.17"
+chardetng = "1.0.0"
 crossbeam = "0.8.4"
 crossterm = "0.29.0"
 dunce = "1.0.5"
@@ -79,6 +83,6 @@ unicode-width = "0.2.2"
 wild = "2.2.1"
 
 [dev-dependencies]
-assert_cmd = "2.1.2"
-assert_fs = "1.1.3"
+assert_cmd = "2.2.2"
+assert_fs = "1.1.4"
 predicates = { workspace = true }

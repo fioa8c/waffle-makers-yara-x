@@ -2,7 +2,7 @@
 
 The scanner takes the rules produces by the compiler and scans data with them.
 */
-use std::collections::{BTreeMap, HashMap, hash_map};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::fs;
 use std::io::Read;
@@ -22,21 +22,20 @@ use memmap2::{Mmap, MmapOptions};
 use protobuf::{CodedInputStream, MessageDyn};
 use thiserror::Error;
 
+use crate::Variable;
 use crate::compiler::{RuleId, Rules};
 use crate::models::Rule;
-use crate::modules::{BUILTIN_MODULES, Module, ModuleError};
-use crate::scanner::context::create_wasm_store_and_ctx;
-use crate::types::{Struct, TypeValue};
-use crate::variables::VariableError;
-use crate::wasm::MATCHING_RULES_BITMAP_BASE;
-use crate::wasm::runtime::Store;
-use crate::{Variable, modules};
-
+use crate::modules::{ModuleError, RegisteredModule};
 pub(crate) use crate::scanner::context::RuntimeObject;
 pub(crate) use crate::scanner::context::RuntimeObjectHandle;
 pub(crate) use crate::scanner::context::ScanContext;
 pub(crate) use crate::scanner::context::ScanState;
+use crate::scanner::context::create_wasm_store_and_ctx;
 pub(crate) use crate::scanner::matches::Match;
+use crate::types::{Struct, TypeValue};
+use crate::variables::VariableError;
+use crate::wasm::MATCHING_RULES_BITMAP_BASE;
+use crate::wasm::runtime::Store;
 
 mod context;
 mod matches;
@@ -112,7 +111,7 @@ static INIT_HEARTBEAT: Once = Once::new();
 pub enum ScannedData<'d> {
     Slice(&'d [u8]),
     Vec(Vec<u8>),
-    Mmap(Mmap),
+    Mmap { mmap: Mmap, len: usize },
 }
 
 impl AsRef<[u8]> for ScannedData<'_> {
@@ -120,7 +119,7 @@ impl AsRef<[u8]> for ScannedData<'_> {
         match self {
             ScannedData::Slice(s) => s,
             ScannedData::Vec(v) => v.as_ref(),
-            ScannedData::Mmap(m) => m.as_ref(),
+            ScannedData::Mmap { mmap, len } => &mmap.as_ref()[..*len],
         }
     }
 }
@@ -220,13 +219,14 @@ pub struct Scanner<'r> {
     _rules: &'r Rules,
     wasm_store: Pin<Box<Store<ScanContext<'static, 'static>>>>,
     use_mmap: bool,
+    max_scan_size: Option<usize>,
 }
 
 impl<'r> Scanner<'r> {
     /// Creates a new scanner.
     pub fn new(rules: &'r Rules) -> Self {
         let wasm_store = create_wasm_store_and_ctx(rules);
-        Self { _rules: rules, wasm_store, use_mmap: true }
+        Self { _rules: rules, wasm_store, use_mmap: true, max_scan_size: None }
     }
 
     /// Sets a timeout for scan operations.
@@ -254,6 +254,62 @@ impl<'r> Scanner<'r> {
         self
     }
 
+    /// Enables or disables fast scan mode.
+    ///
+    /// During rule compilation, the compiler analyzes rule conditions to
+    /// identify patterns that are only ever used in simple boolean existence
+    /// checks (e.g., `$a` in YARA). If a pattern is never queried for its match
+    /// count (`#a`), specific match offset (`@a`), match length (`!a`), or
+    /// evaluated inside a loop, it is classified as a fast-scan pattern.
+    ///
+    /// In fast scan mode, the scanner optimizes scans by stopping the search
+    /// and match tracking for these fast-scan patterns once their **very first
+    /// match** is found. Subsequent occurrences in the input data are ignored,
+    /// preventing redundant Aho-Corasick scans, regex evaluations, and match
+    /// memory allocations.
+    ///
+    /// Note that using fast scan mode implies that not all matches will be
+    /// reported. For instance, when iterating matches using [`ScanResults`],
+    /// you won't get all occurrences of the pattern in the file, only the first
+    /// one.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// # use yara_x::{Compiler, Scanner};
+    /// let mut compiler = Compiler::new();
+    /// compiler.add_source(r#"
+    ///     rule test {
+    ///         strings:
+    ///             $a = "abc"
+    ///         condition:
+    ///             $a
+    ///     }
+    /// "#).unwrap();
+    ///
+    /// let rules = compiler.build();
+    /// let mut scanner = Scanner::new(&rules);
+    ///
+    /// // Enable fast scan mode.
+    /// scanner.fast_scan(true);
+    ///
+    /// // The haystack contains two matches of "abc".
+    /// let results = scanner.scan(b"abc...abc").unwrap();
+    ///
+    /// // Find the matching rule.
+    /// let matching_rule = results.matching_rules().next().unwrap();
+    ///
+    /// // Only a single match is returned for pattern $a.
+    /// let pattern = matching_rule.patterns().next().unwrap();
+    /// let mut matches = pattern.matches();
+    /// assert_eq!(matches.next().unwrap().range().start, 0); // The first match
+    /// assert!(matches.next().is_none()); // No other matches are returned
+    /// ```
+    pub fn fast_scan(&mut self, yes: bool) -> &mut Self {
+        self.scan_context_mut().tracker.fast_scan = yes;
+        self
+    }
+
     /// Specifies whether [`Scanner::scan_file`] and [`Scanner::scan_file_with_options`]
     /// may use memory-mapped files to read input.
     ///
@@ -267,6 +323,21 @@ impl<'r> Scanner<'r> {
     /// but safer.
     pub fn use_mmap(&mut self, yes: bool) -> &mut Self {
         self.use_mmap = yes;
+        self
+    }
+
+    /// Sets the maximum size of the data that will be scanned.
+    ///
+    /// If the scanned data (either a file or an in-memory buffer) is larger
+    /// than this value, it will be truncated to the given size.
+    ///
+    /// The value returned by `filesize` will be also limited to the given
+    /// size.
+    ///
+    /// Also notice that some modules (pe, elf, macho, etc) may be unable
+    /// to properly parse truncated files.
+    pub fn max_scan_size(&mut self, size: usize) -> &mut Self {
+        self.max_scan_size = Some(size);
         self
     }
 
@@ -305,7 +376,13 @@ impl<'r> Scanner<'r> {
         {
             self.scan_context_mut().current_label = None;
         }
-        self.scan_impl(data.try_into()?, None)
+        let mut data = data;
+        if let Some(max) = self.max_scan_size
+            && data.len() > max
+        {
+            data = &data[..max];
+        }
+        self.scan_impl(ScannedData::Slice(data), None)
     }
 
     /// Scans a file.
@@ -335,6 +412,12 @@ impl<'r> Scanner<'r> {
         #[cfg(feature = "rules-profiling")]
         {
             self.scan_context_mut().current_label = options.label.take();
+        }
+        let mut data = data;
+        if let Some(max) = self.max_scan_size
+            && data.len() > max
+        {
+            data = &data[..max];
         }
         self.scan_impl(ScannedData::Slice(data), Some(options))
     }
@@ -428,9 +511,8 @@ impl<'r> Scanner<'r> {
 
         // Check if the protobuf message passed to this function corresponds
         // with any of the existing modules.
-        if !BUILTIN_MODULES
-            .iter()
-            .any(|m| m.1.root_struct_descriptor.full_name() == full_name)
+        if !crate::modules::registered_modules()
+            .any(|m| m.root_descriptor().full_name() == full_name)
         {
             return Err(ScanError::UnknownModule {
                 module: full_name.to_string(),
@@ -458,17 +540,24 @@ impl<'r> Scanner<'r> {
         // Try to find the module by name first, if not found, then try
         // to find a module where the fully-qualified name for its protobuf
         // message matches the `name` arguments.
-        let descriptor = if let Some(module) = BUILTIN_MODULES.get(name) {
-            Some(&module.root_struct_descriptor)
-        } else {
-            BUILTIN_MODULES.values().find_map(|module| {
-                if module.root_struct_descriptor.full_name() == name {
-                    Some(&module.root_struct_descriptor)
+        let descriptor = crate::modules::registered_modules()
+            .find_map(|module| {
+                if module.name() == name {
+                    Some(module.root_descriptor())
                 } else {
                     None
                 }
             })
-        };
+            .or_else(|| {
+                crate::modules::registered_modules().find_map(|module| {
+                    let descriptor = module.root_descriptor();
+                    if descriptor.full_name() == name {
+                        Some(descriptor)
+                    } else {
+                        None
+                    }
+                })
+            });
 
         if descriptor.is_none() {
             return Err(ScanError::UnknownModule { module: name.to_string() });
@@ -543,19 +632,20 @@ impl<'r> Scanner<'r> {
         &self,
         path: &Path,
     ) -> Result<ScannedData<'a>, ScanError> {
-        let mut file = fs::File::open(path).map_err(|err| {
+        let file = fs::File::open(path).map_err(|err| {
             ScanError::OpenError { path: path.to_path_buf(), err }
         })?;
 
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut size = file.metadata().map(|m| m.len()).unwrap_or(0) as usize;
 
-        let mut buffered_file;
-        let mapped_file;
+        if let Some(max_scan_size) = self.max_scan_size {
+            size = std::cmp::min(size, max_scan_size);
+        }
 
         // For files smaller than ~500MB reading the whole file is faster than
         // using a memory-mapped file.
         let data = if self.use_mmap && size > 500_000_000 {
-            mapped_file = unsafe {
+            let mapped_file = unsafe {
                 MmapOptions::new().map_copy_read_only(&file).map_err(|err| {
                     ScanError::MapError { path: path.to_path_buf(), err }
                 })
@@ -564,12 +654,16 @@ impl<'r> Scanner<'r> {
             mapped_file.advise(Advice::Sequential).map_err(|err| {
                 ScanError::MapError { path: path.to_path_buf(), err }
             })?;
-            ScannedData::Mmap(mapped_file)
+            ScannedData::Mmap { mmap: mapped_file, len: size }
         } else {
-            buffered_file = Vec::with_capacity(size as usize);
-            file.read_to_end(&mut buffered_file).map_err(|err| {
-                ScanError::OpenError { path: path.to_path_buf(), err }
-            })?;
+            let mut buffered_file = Vec::with_capacity(size);
+            (&file)
+                .take(size as u64)
+                .read_to_end(&mut buffered_file)
+                .map_err(|err| ScanError::OpenError {
+                    path: path.to_path_buf(),
+                    err,
+                })?;
             ScannedData::Vec(buffered_file)
         };
 
@@ -587,18 +681,19 @@ impl<'r> Scanner<'r> {
         ctx.reset();
 
         // Set the global variable `filesize` to the size of the scanned data.
-        ctx.set_filesize(data.as_ref().len() as i64);
+        ctx.set_filesize(data.len() as i64);
 
         // Indicate that the scanner is currently scanning the given data.
         ctx.scan_state = ScanState::ScanningData(data);
 
         for module_name in ctx.compiled_rules.imports() {
-            // Lookup the module in the list of built-in modules.
-            let module = modules::BUILTIN_MODULES
-                .get(module_name)
+            // Look up the module in the module registry.
+            let module = crate::modules::registered_modules()
+                .find(|module| module.name() == module_name)
                 .unwrap_or_else(|| panic!("module `{module_name}` not found"));
 
-            let root_struct_name = module.root_struct_descriptor.full_name();
+            let module_root_descriptor = module.root_descriptor();
+            let root_struct_name = module_root_descriptor.full_name();
 
             let module_output;
             // If the user already provided some output for the module by
@@ -615,15 +710,15 @@ impl<'r> Scanner<'r> {
                         options.module_metadata.get(module_name).copied()
                     });
 
-                if let Some(main_fn) = module.main_fn {
-                    module_output = Some(
-                        main_fn(ctx.scanned_data().unwrap(), meta).map_err(
-                            |err| ScanError::ModuleError {
-                                module: module_name.to_string(),
-                                err,
-                            },
-                        )?,
-                    );
+                if let Some(main_res) =
+                    module.main_fn(ctx.scanned_data().unwrap(), meta)
+                {
+                    module_output = Some(main_res.map_err(|err| {
+                        ScanError::ModuleError {
+                            module: module_name.to_string(),
+                            err,
+                        }
+                    })?);
                 } else {
                     module_output = None;
                 }
@@ -634,10 +729,10 @@ impl<'r> Scanner<'r> {
                 // the expected type.
                 debug_assert_eq!(
                     module_output.descriptor_dyn().full_name(),
-                    module.root_struct_descriptor.full_name(),
+                    root_struct_name,
                     "main function of module `{}` must return `{}`, but returned `{}`",
                     module_name,
-                    module.root_struct_descriptor.full_name(),
+                    root_struct_name,
                     module_output.descriptor_dyn().full_name(),
                 );
 
@@ -649,7 +744,7 @@ impl<'r> Scanner<'r> {
                     module_output.is_initialized_dyn(),
                     "module `{}` returned a protobuf `{}` where some required fields are not initialized ",
                     module_name,
-                    module.root_struct_descriptor.full_name()
+                    root_struct_name
                 );
             }
 
@@ -668,7 +763,7 @@ impl<'r> Scanner<'r> {
                 !cfg!(feature = "constant-folding");
 
             let module_struct = Struct::from_proto_descriptor_and_msg(
-                &module.root_struct_descriptor,
+                &module_root_descriptor,
                 module_output.as_deref(),
                 generate_fields_for_enums,
             );
@@ -851,11 +946,18 @@ impl<'a, 'r> ScanResults<'a, 'r> {
         &self,
         module_name: &str,
     ) -> Option<&'a dyn MessageDyn> {
-        let module = BUILTIN_MODULES.get(module_name)?;
+        let module_descriptor = crate::modules::registered_modules()
+            .find_map(|m| {
+                if m.name() == module_name {
+                    Some(m.root_descriptor())
+                } else {
+                    None
+                }
+            })?;
         let module_output = self
             .ctx
             .module_outputs
-            .get(module.root_struct_descriptor.full_name())?
+            .get(module_descriptor.full_name())?
             .as_ref();
         Some(module_output)
     }
@@ -1028,7 +1130,7 @@ impl ExactSizeIterator for NonMatchingRules<'_, '_> {
 pub struct ModuleOutputs<'a, 'r> {
     ctx: &'a ScanContext<'r, 'a>,
     len: usize,
-    iterator: hash_map::Iter<'a, &'a str, Module>,
+    iterator: Box<dyn Iterator<Item = &'static dyn RegisteredModule> + 'a>,
 }
 
 impl<'a, 'r> ModuleOutputs<'a, 'r> {
@@ -1036,7 +1138,7 @@ impl<'a, 'r> ModuleOutputs<'a, 'r> {
         Self {
             ctx,
             len: ctx.module_outputs.len(),
-            iterator: BUILTIN_MODULES.iter(),
+            iterator: Box::new(crate::modules::registered_modules()),
         }
     }
 }
@@ -1053,13 +1155,13 @@ impl<'a> Iterator for ModuleOutputs<'a, '_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (name, module) = self.iterator.next()?;
+            let module = self.iterator.next()?;
             if let Some(module_output) = self
                 .ctx
                 .module_outputs
-                .get(module.root_struct_descriptor.full_name())
+                .get(module.root_descriptor().full_name())
             {
-                return Some((*name, module_output.as_ref()));
+                return Some((module.name(), module_output.as_ref()));
             }
         }
     }
