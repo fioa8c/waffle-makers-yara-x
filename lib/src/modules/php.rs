@@ -8,6 +8,9 @@ that other tools classify as images, HTML, or generic data.
 use crate::mods::prelude::*;
 use crate::modules::protos::php::*;
 
+/// Maximum number of bytes searched after a bare `<?` for a PHP token.
+const WEAK_WINDOW: usize = 256;
+
 fn main(data: &[u8], _meta: Option<&[u8]>) -> Result<Php, ModuleError> {
     let mut php = Php::new();
     php.is_php = Some(detect_php(data));
@@ -36,8 +39,38 @@ fn classify_open_tag(after: &[u8]) -> bool {
     {
         return true;
     }
-    // Weak-signal handling is added in Task 3.
-    false
+    // `<?xml` is an XML declaration / processing instruction, not PHP.
+    if after.len() >= 3 && after[..3].eq_ignore_ascii_case(b"xml") {
+        return false;
+    }
+    // Weak: a bare `<?` counts only if a PHP token appears within the window.
+    let end = after.len().min(WEAK_WINDOW);
+    window_has_php_token(&after[..end])
+}
+
+/// PHP superglobals (case-sensitive: PHP requires the exact casing).
+const PHP_SUPERGLOBALS: &[&[u8]] = &[
+    b"$_GET", b"$_POST", b"$_REQUEST", b"$_SERVER", b"$_COOKIE",
+    b"$_FILES", b"$_SESSION", b"$_ENV", b"$GLOBALS",
+];
+
+/// PHP functions/keywords commonly seen in webshells. PHP function and
+/// keyword names are case-insensitive, so the window is lowercased before
+/// matching and every entry here MUST be lowercase.
+const PHP_TOKENS_CI: &[&[u8]] = &[
+    b"eval", b"assert", b"system", b"exec", b"shell_exec", b"passthru",
+    b"base64_decode", b"gzinflate", b"str_rot13", b"preg_replace",
+    b"create_function", b"call_user_func", b"echo", b"function",
+    b"print", b"require", b"include",
+];
+
+/// Returns true if `window` contains any PHP superglobal or token.
+fn window_has_php_token(window: &[u8]) -> bool {
+    if PHP_SUPERGLOBALS.iter().any(|sg| window.find(sg).is_some()) {
+        return true;
+    }
+    let lower = window.to_ascii_lowercase();
+    PHP_TOKENS_CI.iter().any(|tok| lower.find(tok).is_some())
 }
 
 #[cfg(test)]
@@ -60,6 +93,35 @@ mod tests {
         assert!(!detect_php(b"")); // empty
         assert!(!detect_php(b"plain text, no markers")); // no tag
         assert!(!detect_php(b"<?phpx not_a_tag")); // <?phpX is not a valid open tag
+    }
+
+    #[test]
+    fn weak_signal_short_tag() {
+        // Short-tag webshell: bare `<?` + PHP token within the window.
+        assert!(detect_php(b"<? eval($_POST['x']); ?>"));
+        assert!(detect_php(b"<? system($_GET['c']); ?>"));
+    }
+
+    #[test]
+    fn weak_signal_rejects_non_php() {
+        // XML declaration is not PHP.
+        assert!(!detect_php(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assert!(!detect_php(b"<?XML version=\"1.0\"?>")); // case-insensitive xml
+        // Bare `<?` with no PHP token nearby.
+        assert!(!detect_php(b"<? just some text with no php tokens at all >"));
+        // A file that has both an XML declaration AND real PHP must still match.
+        assert!(detect_php(b"<?xml version=\"1.0\"?>\n<root><?php echo 1;?></root>"));
+    }
+
+    #[test]
+    fn weak_signal_window_boundary() {
+        // `<?` at the very end with no following bytes is not PHP.
+        assert!(!detect_php(b"<?"));
+        // A PHP token just beyond the 256-byte window is not detected.
+        let mut buf = b"<? ".to_vec();
+        buf.extend(std::iter::repeat(b'x').take(300));
+        buf.extend_from_slice(b"$_GET");
+        assert!(!detect_php(&buf));
     }
 
     #[test]
