@@ -25,16 +25,22 @@ that other tools classify as images, HTML, or generic data.
 
 Detection is a lightweight heuristic over the whole buffer:
 
-* `<?php` (case-insensitive) and `<?=` are treated as strong signals and mark
-  the data as PHP wherever they appear.
-* A bare `<?` is ambiguous (it is also how XML declarations begin), so it is
-  only counted when it is not `<?xml` and a PHP token (a superglobal such as
-  `$_POST`, or a function/keyword such as `eval`, `system`, or `base64_decode`)
-  appears within the next 256 bytes. This catches short-tag webshells while
-  suppressing XML and incidental binary data.
+* `<?php` (case-insensitive, and only when followed by a non-identifier
+  character) is the one signal that stands on its own. This five-byte sequence
+  does not occur by chance in binary data, so it marks the data as PHP wherever
+  it appears.
+* A short tag — a bare `<?` or the echo tag `<?=` — is ambiguous: those few
+  bytes occur constantly in binary data such as image pixels and compressed
+  streams. A short tag is therefore only counted when a PHP token appears within
+  the next 256 bytes: a superglobal such as `$_POST`, or a function/keyword such
+  as `eval`, `system`, or `base64_decode`. Tokens are matched at identifier word
+  boundaries, so `print` inside `printOutput` does not count.
+* XML processing instructions (`<?xml` and `<?xpacket`, the latter common in the
+  XMP metadata embedded in images) are never treated as PHP.
 
-The module is recall-oriented: it favors catching evasive or obfuscated PHP over
-proving that the data is syntactically valid PHP.
+The module is recall-oriented for genuine PHP code while avoiding the false
+positives that short tags would otherwise cause on binary files. It does not try
+to prove that the data is syntactically valid PHP.
 
 -------
 

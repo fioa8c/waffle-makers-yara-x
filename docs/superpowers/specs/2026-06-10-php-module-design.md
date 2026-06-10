@@ -46,45 +46,57 @@ The module's `main()` receives the full buffer and returns a `Php` protobuf with
 `is_php` set. The decision is made by a single scan for PHP open-tag markers,
 classified by strength:
 
-### Strong signals (any one ⇒ `is_php = true`)
+> **Revision (2026-06-10, post-implementation):** The original design below
+> treated `<?=` as a token-free strong signal. Field testing against a large
+> WordPress-plugin corpus showed this caused a **10% false-positive rate on
+> image files** — the three bytes `<?=` (`0x3C 0x3F 0x3D`) occur constantly by
+> chance in PSD/XCF/PNG pixel and compressed data. Substring token matching and
+> the missing `<?xpacket` exclusion compounded it. Measured over 4000 real
+> `.php` files and 3268 images, the revised algorithm (`<?php` is the only
+> token-free signal; `<?=`/`<?` require a word-boundary token; `<?xml` and
+> `<?xpacket` excluded) drops image false positives to **0%** while keeping PHP
+> recall at **99.48%** (vs 99.50%). The text below reflects the shipped behavior.
 
-- `<?php` — case-insensitive on the `php` keyword, i.e. matches `<?PHP`,
-  `<?Php`, etc. May be preceded by any bytes (handles `GIF89a...<?php`,
-  HTML-then-PHP, leading BOM/whitespace).
-- `<?=` — the short-echo tag, which is always PHP regardless of
-  `short_open_tag` configuration.
+### Strong signal (token-free ⇒ `is_php = true`)
 
-### Weak signal (bare `<?`)
+- `<?php` — case-insensitive on the `php` keyword (matches `<?PHP`, `<?Php`,
+  etc.), and **only** when the keyword is followed by a non-identifier byte or
+  end-of-buffer (so `<?phpx` is not a tag). May be preceded by any bytes
+  (handles `GIF89a...<?php`, HTML-then-PHP, leading BOM/whitespace). This is the
+  only signal that needs no corroboration, because the five-byte sequence does
+  not occur by chance in binary data.
 
-A bare `<?` that is **not** one of the strong forms is ambiguous: it is also how
-XML declarations (`<?xml`), XML processing instructions, and incidental binary
-bytes appear. A bare `<?` counts toward `is_php` only when **both** hold:
+### Short tags (`<?` and `<?=`) require corroboration
 
-1. It is **not** `<?xml` (case-insensitive), and not immediately followed by a
-   character that makes it a recognized non-PHP processing instruction. (We
-   special-case `xml`; other PIs are rare enough to treat the bare `<?`
-   normally.)
-2. Within a bounded window after the `<?` (proposed: **256 bytes**, capped at
-   end of buffer) at least one **PHP token indicator** appears. Proposed token
-   set (literal, case-insensitive where noted):
-   - Superglobals: `$_GET`, `$_POST`, `$_REQUEST`, `$_SERVER`, `$_COOKIE`,
-     `$_FILES`, `$_SESSION`, `$_ENV`, `$GLOBALS`
-   - Common shell/eval primitives: `eval`, `assert`, `system`, `exec`,
-     `shell_exec`, `passthru`, `base64_decode`, `gzinflate`, `str_rot13`,
-     `preg_replace`, `create_function`, `call_user_func`
-   - Language keywords/sigils: `<?php` is already strong; for weak we look for
-     `echo`, `function`, `print`, `require`, `include`, and the PHP statement
-     terminator pattern `;` preceded by a `$variable`.
+A bare `<?` or the echo tag `<?=` is ambiguous: those few bytes are also how XML
+declarations (`<?xml`), XMP packets (`<?xpacket`), other XML processing
+instructions, and incidental binary bytes appear. A short tag counts toward
+`is_php` only when **both** hold:
 
-   The token set is a tunable constant. The intent is "a bare `<?` plus evidence
-   of PHP semantics nearby," which catches `short_open_tag` webshells while
-   rejecting plain XML and random binary.
+1. It is **not** an XML processing instruction — i.e. not `<?xml` and not
+   `<?xpacket` (both case-insensitive). Excluding this occurrence does not stop
+   the scan; a real `<?php`/short tag later in the buffer is still detected.
+2. Within a bounded window after the `<?` (**256 bytes**, capped at end of
+   buffer) at least one **PHP token** appears, matched at identifier **word
+   boundaries** (so `print` inside `printOutput`, or `eval` inside binary, do
+   not count). Token set (a tunable constant):
+   - Superglobals (case-sensitive, trailing boundary): `$_GET`, `$_POST`,
+     `$_REQUEST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_SESSION`, `$_ENV`,
+     `$GLOBALS`
+   - Functions/keywords (case-insensitive, both-side boundary): `eval`,
+     `assert`, `system`, `exec`, `shell_exec`, `passthru`, `base64_decode`,
+     `gzinflate`, `str_rot13`, `preg_replace`, `create_function`,
+     `call_user_func`, `echo`, `function`, `print`, `require`, `include`
+
+   The intent is "a short tag plus evidence of PHP semantics nearby," which
+   catches `short_open_tag` webshells while rejecting XML, image metadata, and
+   random binary.
 
 ### Result
 
-`is_php` is `true` if any strong signal is found, or any qualifying weak signal
-is found. Otherwise `false`. The field is always set (never left undefined) so
-that `not php.is_php` behaves predictably.
+`is_php` is `true` if the strong signal is found, or any qualifying short tag is
+found. Otherwise `false`. The field is always set (never left undefined) so that
+`not php.is_php` behaves predictably.
 
 ### Performance
 

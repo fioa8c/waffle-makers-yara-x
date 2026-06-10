@@ -26,26 +26,40 @@ fn detect_php(data: &[u8]) -> bool {
 /// Classifies the bytes that follow a `<?` marker. `after` is the slice
 /// starting immediately after the `<?`.
 fn classify_open_tag(after: &[u8]) -> bool {
-    // Strong: `<?=` short-echo tag is always PHP.
-    if after.first() == Some(&b'=') {
-        return true;
-    }
-    // Strong: `<?php` open tag (keyword is case-insensitive). The keyword
-    // must be followed by a non-identifier byte or end-of-buffer, otherwise
-    // it is `<?phpsomething` which is not a PHP open tag.
+    // `<?php` is the only token-free signal: the keyword (case-insensitive)
+    // followed by a non-identifier byte or end-of-buffer. Unlike bare `<?` or
+    // the echo tag `<?=`, this five-byte sequence does not occur by chance in
+    // binary data, so it needs no corroboration.
     if after.len() >= 3
         && after[..3].eq_ignore_ascii_case(b"php")
-        && after.get(3).is_none_or(|&b| !b.is_ascii_alphanumeric() && b != b'_')
+        && after.get(3).is_none_or(|&b| !is_ident_byte(b))
     {
         return true;
     }
-    // `<?xml` is an XML declaration / processing instruction, not PHP.
-    if after.len() >= 3 && after[..3].eq_ignore_ascii_case(b"xml") {
+    // XML processing instructions (`<?xml`, `<?xpacket`) are not PHP. They are
+    // common in image metadata (e.g. XMP packets embedded in PSD/JPEG/PNG).
+    // Skip this occurrence but keep scanning for a real PHP tag later on.
+    if is_xml_pi(after) {
         return false;
     }
-    // Weak: a bare `<?` counts only if a PHP token appears within the window.
+    // Any other short tag — a bare `<?` or the echo tag `<?=` — is only treated
+    // as PHP when a PHP token appears nearby. On their own these few bytes
+    // occur constantly in binary data (image pixels, compressed streams), so
+    // corroboration is required to avoid false positives.
     let end = after.len().min(WEAK_WINDOW);
     window_has_php_token(&after[..end])
+}
+
+/// True if `after` (the bytes following `<?`) begins an XML processing
+/// instruction target that must not be mistaken for PHP.
+fn is_xml_pi(after: &[u8]) -> bool {
+    (after.len() >= 3 && after[..3].eq_ignore_ascii_case(b"xml"))
+        || (after.len() >= 7 && after[..7].eq_ignore_ascii_case(b"xpacket"))
+}
+
+/// True if `b` can appear inside a PHP identifier (`[A-Za-z0-9_]`).
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// PHP superglobals (case-sensitive: PHP requires the exact casing).
@@ -64,13 +78,35 @@ const PHP_TOKENS_CI: &[&[u8]] = &[
     b"print", b"require", b"include",
 ];
 
-/// Returns true if `window` contains any PHP superglobal or token.
+/// Returns true if `window` contains a PHP superglobal or a PHP
+/// function/keyword token at an identifier word boundary. Word-boundary
+/// matching prevents a token from matching inside a larger word (e.g. `print`
+/// inside `printOutput`) or inside incidental binary data.
 fn window_has_php_token(window: &[u8]) -> bool {
-    if PHP_SUPERGLOBALS.iter().any(|sg| window.find(sg).is_some()) {
-        return true;
+    // Superglobals are case-sensitive (PHP requires the exact casing) and
+    // already begin with a distinctive `$`, so only a trailing boundary is
+    // required.
+    for sg in PHP_SUPERGLOBALS {
+        for pos in window.find_iter(sg) {
+            let end = pos + sg.len();
+            if window.get(end).is_none_or(|&b| !is_ident_byte(b)) {
+                return true;
+            }
+        }
     }
+    // Function/keyword names are case-insensitive; lowercase the window once
+    // and require an identifier boundary on both sides.
     let lower = window.to_ascii_lowercase();
-    PHP_TOKENS_CI.iter().any(|tok| lower.find(tok).is_some())
+    for tok in PHP_TOKENS_CI {
+        for pos in lower.find_iter(tok) {
+            let lead = pos == 0 || !is_ident_byte(lower[pos - 1]);
+            let trail = lower.get(pos + tok.len()).is_none_or(|&b| !is_ident_byte(b));
+            if lead && trail {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -82,9 +118,10 @@ mod tests {
 
     #[test]
     fn strong_signals() {
+        // `<?php` (case-insensitive, word-boundary) is the only token-free
+        // signal: it does not occur by chance in binary data.
         assert!(detect_php(b"<?php echo 1;"));
         assert!(detect_php(b"<?PHP echo 1;")); // case-insensitive keyword
-        assert!(detect_php(b"<?= $x ?>")); // short echo tag
         assert!(detect_php(
             b"GIF89a....\x00<?php system($_GET['c']);"
         )); // polyglot
@@ -94,6 +131,32 @@ mod tests {
         assert!(!detect_php(b"")); // empty
         assert!(!detect_php(b"plain text, no markers")); // no tag
         assert!(!detect_php(b"<?phpx not_a_tag")); // <?phpX is not a valid open tag
+    }
+
+    #[test]
+    fn short_echo_tag_needs_corroboration() {
+        // The echo tag `<?=` is only PHP when a real PHP token is nearby...
+        assert!(detect_php(b"<?= $_GET['x'] ?>"));
+        assert!(detect_php(b"<?=system($_POST[0])?>"));
+        // ...a bare echo with no PHP token is not detected. On its own `<?=`
+        // is three bytes that occur constantly in binary image data.
+        assert!(!detect_php(b"<?= $title ?>"));
+    }
+
+    #[test]
+    fn rejects_image_and_binary_false_positives() {
+        // `<?=` followed by binary noise (extremely common by chance in
+        // images) must not be flagged as PHP.
+        assert!(!detect_php(b"<?=\x6e\xa5\x24\x6b\x60\x0b\x57\xed\xe0=binary"));
+        // An XMP packet processing instruction (found in PSD/JPEG/PNG
+        // metadata) is not PHP, even with a token *substring* nearby.
+        assert!(!detect_php(
+            b"<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\x00\x0bprintOutput"
+        ));
+        // A token that is only a substring of a larger word must not match
+        // (word boundary): `print` inside `printOutput`, `eval` inside binary.
+        assert!(!detect_php(b"<? plain text mentioning printOutput only"));
+        assert!(!detect_php(b"<?ADHEVALTJCDDCCITGIGOIC"));
     }
 
     #[test]
