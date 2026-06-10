@@ -27,8 +27,13 @@ fn classify_open_tag(after: &[u8]) -> bool {
     if after.first() == Some(&b'=') {
         return true;
     }
-    // Strong: `<?php` (keyword is case-insensitive).
-    if after.len() >= 3 && after[..3].eq_ignore_ascii_case(b"php") {
+    // Strong: `<?php` open tag (keyword is case-insensitive). The keyword
+    // must be followed by a non-identifier byte or end-of-buffer, otherwise
+    // it is `<?phpsomething` which is not a PHP open tag.
+    if after.len() >= 3
+        && after[..3].eq_ignore_ascii_case(b"php")
+        && after.get(3).is_none_or(|&b| !b.is_ascii_alphanumeric() && b != b'_')
+    {
         return true;
     }
     // Weak-signal handling is added in Task 3.
@@ -54,6 +59,7 @@ mod tests {
         )); // embedded
         assert!(!detect_php(b"")); // empty
         assert!(!detect_php(b"plain text, no markers")); // no tag
+        assert!(!detect_php(b"<?phpx not_a_tag")); // <?phpX is not a valid open tag
     }
 
     #[test]
