@@ -15,15 +15,46 @@ fn main(data: &[u8], _meta: Option<&[u8]>) -> Result<Php, ModuleError> {
 }
 
 /// Returns true if PHP code appears anywhere in `data`.
-fn detect_php(_data: &[u8]) -> bool {
-    // Implemented incrementally in later tasks.
+fn detect_php(data: &[u8]) -> bool {
+    // Examine every `<?` occurrence; classify what follows it.
+    data.find_iter("<?").any(|pos| classify_open_tag(&data[pos + 2..]))
+}
+
+/// Classifies the bytes that follow a `<?` marker. `after` is the slice
+/// starting immediately after the `<?`.
+fn classify_open_tag(after: &[u8]) -> bool {
+    // Strong: `<?=` short-echo tag is always PHP.
+    if after.first() == Some(&b'=') {
+        return true;
+    }
+    // Strong: `<?php` (keyword is case-insensitive).
+    if after.len() >= 3 && after[..3].eq_ignore_ascii_case(b"php") {
+        return true;
+    }
+    // Weak-signal handling is added in Task 3.
     false
 }
 
 #[cfg(test)]
 mod tests {
+    use super::detect_php;
     use crate::tests::rule_false;
     use crate::tests::test_rule;
+
+    #[test]
+    fn strong_signals() {
+        assert!(detect_php(b"<?php echo 1;"));
+        assert!(detect_php(b"<?PHP echo 1;")); // case-insensitive keyword
+        assert!(detect_php(b"<?= $x ?>")); // short echo tag
+        assert!(detect_php(
+            b"GIF89a....\x00<?php system($_GET['c']);"
+        )); // polyglot
+        assert!(detect_php(
+            b"<html><body><?php phpinfo(); ?></body></html>"
+        )); // embedded
+        assert!(!detect_php(b"")); // empty
+        assert!(!detect_php(b"plain text, no markers")); // no tag
+    }
 
     #[test]
     fn module_is_importable() {
