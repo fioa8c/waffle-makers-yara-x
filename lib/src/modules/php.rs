@@ -177,7 +177,10 @@ mod tests {
     #[test]
     fn rule_short_circuit_gate() {
         // Documents the intended usage: `php.is_php` first gates the patterns.
-        // On non-PHP data the pattern is never searched and the rule is false.
+        // On non-PHP data the rule is false even though the pattern bytes are
+        // present, because `php.is_php` is false. (YARA-X searches patterns
+        // lazily, so a false gate also skips the search; this test only asserts
+        // the observable match result, not the skip itself.)
         rule_false!(
             r#"
             import "php"
