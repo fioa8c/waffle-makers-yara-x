@@ -18,6 +18,7 @@ pub mod math;
 pub mod mods;
 pub mod net_analysis;
 pub mod pe;
+pub mod php;
 pub mod sandbox;
 pub mod sigma;
 pub mod string;

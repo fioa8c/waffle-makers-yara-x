@@ -23,6 +23,8 @@ mod magic;
 mod math;
 #[cfg(feature = "pe-module")]
 mod pe;
+#[cfg(feature = "php-module")]
+mod php;
 #[cfg(feature = "string-module")]
 mod string;
 #[cfg(feature = "test_proto2-module")]

@@ -1,0 +1,16 @@
+syntax = "proto2";
+
+import "yara.proto";
+
+package php;
+
+option (yara.module_options) = {
+  name : "php"
+  root_message: "php.Php"
+  cargo_feature: "php-module"
+};
+
+message Php {
+  // True when PHP code is detected anywhere in the scanned data.
+  optional bool is_php = 1;
+}

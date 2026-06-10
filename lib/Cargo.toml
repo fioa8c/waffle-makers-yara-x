@@ -209,6 +209,9 @@ magic-module = [
 # The `math` module.
 math-module = []
 
+# The `php` module detects PHP code anywhere in the scanned data.
+php-module = []
+
 # The `pe` module parses PE files.
 pe-module = [
     "crypto",
