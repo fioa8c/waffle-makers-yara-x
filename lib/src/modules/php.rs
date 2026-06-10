@@ -77,6 +77,7 @@ fn window_has_php_token(window: &[u8]) -> bool {
 mod tests {
     use super::detect_php;
     use crate::tests::rule_false;
+    use crate::tests::rule_true;
     use crate::tests::test_rule;
 
     #[test]
@@ -100,6 +101,8 @@ mod tests {
         // Short-tag webshell: bare `<?` + PHP token within the window.
         assert!(detect_php(b"<? eval($_POST['x']); ?>"));
         assert!(detect_php(b"<? system($_GET['c']); ?>"));
+        // Uppercase function name is still PHP (case-insensitive tokens).
+        assert!(detect_php(b"<? EVAL($_POST['x']); ?>"));
     }
 
     #[test]
@@ -133,6 +136,67 @@ mod tests {
             import "php"
             rule test { condition: php.is_php }"#,
             b""
+        );
+    }
+
+    #[test]
+    fn rule_detects_php() {
+        rule_true!(
+            r#"
+            import "php"
+            rule test { condition: php.is_php }"#,
+            b"<?php echo 1;"
+        );
+
+        // Polyglot: PHP appended after an image header.
+        rule_true!(
+            r#"
+            import "php"
+            rule test { condition: php.is_php }"#,
+            b"GIF89a\x01\x00\x01\x00<?php system($_GET['c']); ?>"
+        );
+    }
+
+    #[test]
+    fn rule_rejects_non_php() {
+        rule_false!(
+            r#"
+            import "php"
+            rule test { condition: php.is_php }"#,
+            b"<?xml version=\"1.0\"?><note><to>x</to></note>"
+        );
+
+        rule_false!(
+            r#"
+            import "php"
+            rule test { condition: php.is_php }"#,
+            b"just plain text"
+        );
+    }
+
+    #[test]
+    fn rule_short_circuit_gate() {
+        // Documents the intended usage: `php.is_php` first gates the patterns.
+        // On non-PHP data the pattern is never searched and the rule is false.
+        rule_false!(
+            r#"
+            import "php"
+            rule php_webshell {
+                strings: $a = "eval($_POST"
+                condition: php.is_php and $a
+            }"#,
+            b"this file is not php and contains eval($_POST as plain text"
+        );
+
+        // On PHP data with the pattern present, the rule matches.
+        rule_true!(
+            r#"
+            import "php"
+            rule php_webshell {
+                strings: $a = "eval($_POST"
+                condition: php.is_php and $a
+            }"#,
+            b"<?php eval($_POST['x']); ?>"
         );
     }
 }
