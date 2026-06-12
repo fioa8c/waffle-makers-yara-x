@@ -107,3 +107,31 @@ fn diagnose_json_output() {
     assert_eq!(entries[0]["slow"], true);
     assert_eq!(entries[0]["atoms"]["count"], 2704);
 }
+
+#[cfg(feature = "rules-profiling")]
+#[test]
+fn diagnose_scan_reports_rule_timing() {
+    let temp_dir = TempDir::new().unwrap();
+    let rules_file = temp_dir.child("rules.yar");
+    rules_file
+        .write_str(
+            r#"rule slow_rule { strings: $a = /[A-Za-z]{2,}/ condition: $a }"#,
+        )
+        .unwrap();
+    let sample_file = temp_dir.child("sample.bin");
+    sample_file
+        .write_str(
+            &"The quick brown fox jumps over the lazy dog. ".repeat(2000),
+        )
+        .unwrap();
+
+    Command::new(cargo_bin!("yr"))
+        .arg("diagnose")
+        .arg("--scan")
+        .arg(sample_file.path())
+        .arg(rules_file.path())
+        .assert()
+        .stdout(predicate::str::contains("slowest rules"))
+        .stdout(predicate::str::contains("slow_rule"))
+        .success();
+}

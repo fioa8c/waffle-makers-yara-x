@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(feature = "rules-profiling")]
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -19,7 +21,8 @@ use crate::config::Config;
 use crate::walk::Walker;
 
 pub fn diagnose() -> Command {
-    super::command("diagnose")
+    #[allow(unused_mut)]
+    let mut cmd = super::command("diagnose")
         .about("Explain why patterns are slow")
         .long_about(
             "Compiles the rules with diagnostics collection enabled and \
@@ -44,7 +47,20 @@ pub fn diagnose() -> Command {
                     .value_parser(["text", "json"])
                     .default_value("text"),
             ],
-        ))
+        ));
+
+    #[cfg(feature = "rules-profiling")]
+    {
+        cmd = cmd.arg(
+            clap::arg!(--"scan" <SAMPLE_PATH>)
+                .help(
+                    "Scan a sample file or directory and report per-rule \
+                     timing alongside the static findings",
+                )
+                .value_parser(clap::value_parser!(PathBuf)),
+        );
+    }
+    cmd
 }
 
 /// A source file that was fed to the compiler, paired with the cumulative
@@ -117,7 +133,8 @@ pub fn exec_diagnose(
         bail!("{} error(s) found", compiler.errors().len());
     }
 
-    let diags = compiler.pattern_diagnostics();
+    let diags: Vec<PatternDiagnostics> =
+        compiler.pattern_diagnostics().to_vec();
 
     let selected: Vec<(usize, &PatternDiagnostics)> = diags
         .iter()
@@ -136,6 +153,11 @@ pub fn exec_diagnose(
             num_slow,
             diags.len()
         );
+    }
+
+    #[cfg(feature = "rules-profiling")]
+    if let Some(sample_path) = args.get_one::<PathBuf>("scan") {
+        scan_and_report(compiler, sample_path, &diags)?;
     }
 
     Ok(())
@@ -429,6 +451,78 @@ fn print_json(
         serde_json::to_string_pretty(&serde_json::Value::Array(entries))
             .unwrap()
     );
+}
+
+#[cfg(feature = "rules-profiling")]
+fn scan_and_report(
+    compiler: yara_x::Compiler,
+    sample_path: &Path,
+    diags: &[PatternDiagnostics],
+) -> anyhow::Result<()> {
+    use std::time::Duration;
+
+    let rules = compiler.build();
+    let mut scanner = yara_x::Scanner::new(&rules);
+
+    let w = Walker::path(sample_path);
+    w.walk(
+        |file_path| {
+            let data = fs::read(file_path).with_context(|| {
+                format!("can not read `{}`", file_path.display())
+            })?;
+            let _ = scanner.scan(&data);
+            Ok(())
+        },
+        Err,
+    )?;
+
+    let slowest = scanner.slowest_rules(20);
+
+    if slowest.is_empty() {
+        println!("no profiling data collected");
+        return Ok(());
+    }
+
+    let total: Duration = slowest
+        .iter()
+        .map(|p| p.condition_exec_time + p.pattern_matching_time)
+        .sum();
+
+    println!("slowest rules while scanning `{}`:", sample_path.display());
+    for p in &slowest {
+        let rule_time = p.condition_exec_time + p.pattern_matching_time;
+        let pct = if total.as_nanos() > 0 {
+            rule_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "rule {}:{} — {:.2?} ({:.0}% of profiled time; condition \
+             {:.2?}, patterns {:.2?})",
+            p.namespace,
+            p.rule,
+            rule_time,
+            pct,
+            p.condition_exec_time,
+            p.pattern_matching_time,
+        );
+        let mut slow_idents: Vec<&str> = diags
+            .iter()
+            .filter(|d| d.rule_name == p.rule && d.slow_reason.is_some())
+            .map(|d| d.pattern_ident.as_str())
+            .collect();
+        slow_idents.sort_unstable();
+        slow_idents.dedup();
+        if !slow_idents.is_empty() {
+            println!(
+                "  statically-flagged slow patterns in this rule: {} \
+                 (details above)",
+                slow_idents.join(", ")
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
