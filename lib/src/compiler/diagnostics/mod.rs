@@ -80,7 +80,6 @@ pub enum SlowReason {
 impl SlowReason {
     /// Applies the slow-pattern heuristics to a sequence of atom lengths.
     /// Returns `None` if the atoms are good enough.
-    #[allow(dead_code)] // Used by c_regexp in the next commit.
     pub(crate) fn from_atom_sizes<I>(sizes: I) -> Option<SlowReason>
     where
         I: IntoIterator<Item = usize>,

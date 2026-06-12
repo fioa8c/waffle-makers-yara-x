@@ -16,7 +16,7 @@ use std::{env, fmt, fs, io, iter};
 
 use bitflags::bitflags;
 use bstr::{BStr, ByteSlice};
-use itertools::{Itertools, MinMaxResult, izip};
+use itertools::izip;
 #[cfg(feature = "logging")]
 use log::*;
 use regex_syntax::hir;
@@ -2556,36 +2556,22 @@ impl Compiler<'_> {
             ));
         }
 
-        let (slow_pattern, note) =
-            match re_atoms.iter().map(|re_atom| re_atom.atom.len()).minmax() {
-                // No atoms, slow pattern.
-                MinMaxResult::NoElements => (true, None),
-                // Only one atom of len 0.
-                MinMaxResult::OneElement(0) => (
-                    true,
-                    Some(
-                        "this is an exceptionally extreme case that may severely degrade scanning throughput"
-                            .to_string(),
-                    ),
-                ),
-                // Only one atom shorter than 2 bytes, slow pattern.
-                MinMaxResult::OneElement(len) if len < 2 => (true, None),
-                // More than one atom, at least one is shorter than 2 bytes.
-                MinMaxResult::MinMax(min, _) if min < 2 => (true, None),
-                // More than 2700 atoms, all with exactly 2 bytes.
-                // Why 2700?. The larger the number of atoms the higher the
-                // odds of finding one of them in the data, which slows down
-                // the scan. The regex [A-Za-z]{N,} (with N>=2) produces
-                // (26+26)^2 = 2704 atoms. So, 2700 is large enough, but
-                // produces a warning with the aforementioned regex.
-                MinMaxResult::MinMax(2, 2) if re_atoms.len() > 2700 => {
-                    (true, None)
-                }
-                // In all other cases the pattern is not slow.
-                _ => (false, None),
-            };
+        let slow_reason = diagnostics::SlowReason::from_atom_sizes(
+            re_atoms.iter().map(|re_atom| re_atom.atom.len()),
+        );
 
-        if slow_pattern {
+        if let Some(reason) = &slow_reason {
+            let note = if matches!(
+                reason,
+                diagnostics::SlowReason::ZeroLengthAtom
+            ) {
+                Some(
+                    "this is an exceptionally extreme case that may severely degrade scanning throughput"
+                        .to_string(),
+                )
+            } else {
+                None
+            };
             if self.error_on_slow_pattern {
                 return Err(errors::SlowPattern::build(
                     &self.report_builder,
