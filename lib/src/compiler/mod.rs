@@ -2258,40 +2258,6 @@ impl Compiler<'_> {
             //   /foo|bar|baz/
             //   { 01 02 03 }
             //   { (01 02 03 | 04 05 06 ) }
-            if self.pattern_diagnostics_enabled {
-                // For literal/alternation-of-literals patterns the atom is
-                // the best sub-sequence of the literal itself; compute stats
-                // before moving `head` into c_alternation_literal.
-                let atom_len = head
-                    .as_literal_bytes()
-                    .map(|b| best_atom_in_bytes(b).len())
-                    .unwrap_or(0);
-                let rule_name = self
-                    .rules
-                    .last()
-                    .and_then(|rule| self.ident_pool.get(rule.ident_id))
-                    .unwrap_or_default()
-                    .to_string();
-                self.pattern_diagnostics.push(
-                    diagnostics::PatternDiagnostics {
-                        rule_name,
-                        pattern_ident: self
-                            .current_pattern_ident
-                            .clone()
-                            .unwrap_or_default(),
-                        span: span.clone(),
-                        slow_reason: None,
-                        atom_stats: Some(diagnostics::AtomStats {
-                            count: 1,
-                            min_len: atom_len,
-                            max_len: atom_len,
-                            exact_count: 1,
-                            samples: Vec::new(),
-                        }),
-                        culprits: Vec::new(),
-                    },
-                );
-            }
             return self.c_alternation_literal(
                 pattern_id,
                 head,

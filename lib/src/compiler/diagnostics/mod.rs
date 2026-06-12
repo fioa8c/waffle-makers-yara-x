@@ -5,6 +5,12 @@ When diagnostics collection is enabled with
 [`PatternDiagnostics`] entry per compiled regexp/hex pattern segment, built
 from the same extracted atoms used by the scanner. These records power the
 `yr diagnose` command.
+
+Diagnostics are recorded for patterns that go through the regexp/hex
+compilation pipeline. Plain text patterns and regexps that are literals
+(or alternations of literals) are compiled through a simpler path that
+extracts trivially good atoms; they are only covered by the
+common-byte-repetition check.
 */
 
 use yara_x_parser::Span;
@@ -205,7 +211,7 @@ mod tests {
     #[test]
     fn records_healthy_regexp() {
         let diags = diagnostics_for(
-            r#"rule test { strings: $a = /abcdefgh/ condition: $a }"#,
+            r#"rule test { strings: $a = /abcd[0-9]efgh/ condition: $a }"#,
         );
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].slow_reason, None);
