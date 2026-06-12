@@ -393,10 +393,10 @@ fn print_text(
             println!("  culprit : {}", culprit_text(culprit));
             println!("  suggest : {}", culprit_suggestion(culprit));
         }
-        if d.culprits.is_empty() {
-            if let Some(reason) = &d.slow_reason {
-                println!("  suggest : {}", reason_suggestion(reason));
-            }
+        if d.culprits.is_empty()
+            && let Some(reason) = &d.slow_reason
+        {
+            println!("  suggest : {}", reason_suggestion(reason));
         }
         println!();
     }

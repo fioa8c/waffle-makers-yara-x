@@ -1075,16 +1075,19 @@ fn rules_profiling_top_k_eviction() {
     // more than 10 retained entries. `BoundedTopK` unit tests
     // (`lib/src/scanner/profiling.rs`) verify that the *correct* 10 are
     // retained against known time values; here we only verify the bound.
-    assert!(offenders.len() <= 10, "heap exceeded capacity: {} entries", offenders.len());
-    assert!(!offenders.is_empty(), "expected at least one offender when threshold crossed");
+    assert!(
+        offenders.len() <= 10,
+        "heap exceeded capacity: {} entries",
+        offenders.len()
+    );
+    assert!(
+        !offenders.is_empty(),
+        "expected at least one offender when threshold crossed"
+    );
 
     // All retained labels must come from this test's submissions.
     for f in offenders {
-        assert!(
-            f.label.starts_with("scan-"),
-            "unexpected label: {}",
-            f.label
-        );
+        assert!(f.label.starts_with("scan-"), "unexpected label: {}", f.label);
     }
 
     // Sorted descending by time.
