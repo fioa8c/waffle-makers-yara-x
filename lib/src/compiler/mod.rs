@@ -78,6 +78,7 @@ mod rules;
 mod tests;
 
 pub mod base64;
+pub mod diagnostics;
 pub mod errors;
 pub mod linters;
 pub mod warnings;
