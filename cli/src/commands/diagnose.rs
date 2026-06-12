@@ -389,7 +389,21 @@ fn print_text(
         if let Some(stats) = &d.atom_stats {
             println!("  atoms   : {}", atoms_line(stats));
         }
-        for culprit in &d.culprits {
+        let mut seen = Vec::new();
+        let culprits: Vec<&Culprit> = d
+            .culprits
+            .iter()
+            .filter(|c| {
+                let text = culprit_text(c);
+                if seen.contains(&text) {
+                    false
+                } else {
+                    seen.push(text);
+                    true
+                }
+            })
+            .collect();
+        for culprit in culprits {
             println!("  culprit : {}", culprit_text(culprit));
             println!("  suggest : {}", culprit_suggestion(culprit));
         }
@@ -419,6 +433,20 @@ fn print_json(
             let start = d.span.start();
             let end = d.span.end().min(src.content.len());
             let (line, col) = line_col(&src.content, start);
+            let mut seen = Vec::new();
+            let culprits: Vec<&Culprit> = d
+                .culprits
+                .iter()
+                .filter(|c| {
+                    let text = culprit_text(c);
+                    if seen.contains(&text) {
+                        false
+                    } else {
+                        seen.push(text);
+                        true
+                    }
+                })
+                .collect();
             serde_json::json!({
                 "rule": d.rule_name,
                 "pattern": d.pattern_ident,
@@ -438,7 +466,7 @@ fn print_json(
                         .map(|b| b.as_slice().escape_ascii().to_string())
                         .collect::<Vec<_>>(),
                 })),
-                "culprits": d.culprits.iter().map(|c| serde_json::json!({
+                "culprits": culprits.iter().map(|c| serde_json::json!({
                     "detail": culprit_text(c),
                     "suggestion": culprit_suggestion(c),
                 })).collect::<Vec<_>>(),
