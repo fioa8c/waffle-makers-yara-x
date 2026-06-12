@@ -45,8 +45,8 @@ fn is_unbounded_rep(hir: &Hir) -> bool {
 }
 
 /// Flags unbounded repetitions at the very start or end of the pattern.
-/// YARA patterns are unanchored, so a leading `.*` adds nothing and a
-/// trailing one only extends matches; both prevent atom anchoring.
+/// YARA patterns are typically unanchored; an unbounded repetition at
+/// either edge prevents atom anchoring regardless.
 fn edge_repetitions(hir: &Hir, culprits: &mut Vec<Culprit>) {
     match hir.kind() {
         HirKind::Repetition(rep) if rep.max.is_none() => {

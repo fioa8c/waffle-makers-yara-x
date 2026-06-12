@@ -133,6 +133,7 @@ pub fn exec_diagnose(
         bail!("{} error(s) found", compiler.errors().len());
     }
 
+    // Cloned because `--scan` consumes the compiler via `build()`.
     let diags: Vec<PatternDiagnostics> =
         compiler.pattern_diagnostics().to_vec();
 
@@ -497,7 +498,7 @@ fn scan_and_report(
             0.0
         };
         println!(
-            "rule {}:{} — {:.2?} ({:.0}% of profiled time; condition \
+            "rule {}:{} — {:.2?} ({:.0}% of top-20 time; condition \
              {:.2?}, patterns {:.2?})",
             p.namespace,
             p.rule,
@@ -508,6 +509,9 @@ fn scan_and_report(
         );
         let mut slow_idents: Vec<&str> = diags
             .iter()
+            // TODO(namespace-join): PatternDiagnostics lacks a namespace
+            // field; same-named rules in different namespaces may
+            // cross-attribute findings here.
             .filter(|d| d.rule_name == p.rule && d.slow_reason.is_some())
             .map(|d| d.pattern_ident.as_str())
             .collect();
