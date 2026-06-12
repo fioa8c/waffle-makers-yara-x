@@ -1,7 +1,7 @@
 /*! Structured diagnostics about pattern slowness.
 
 When diagnostics collection is enabled with
-[`crate::Compiler::collect_pattern_diagnostics`], the compiler records one
+`Compiler::collect_pattern_diagnostics`, the compiler records one
 [`PatternDiagnostics`] entry per compiled regexp/hex pattern segment, built
 from the same extracted atoms used by the scanner. These records power the
 `yr diagnose` command.
@@ -41,6 +41,7 @@ pub struct PatternDiagnostics {
 /// Statistics about the atoms extracted from a pattern.
 #[derive(Clone, Debug)]
 pub struct AtomStats {
+    /// Total number of atoms extracted from the pattern.
     pub count: usize,
     /// Length of the shortest atom. 0 when `count` is 0.
     pub min_len: usize,
@@ -55,7 +56,7 @@ pub struct AtomStats {
 
 /// The heuristic that classified a pattern as slow.
 ///
-/// The first five variants mirror the conditions checked in
+/// All variants except `CommonByteRepetition` mirror the conditions checked in
 /// `Compiler::c_regexp`; `CommonByteRepetition` mirrors the check for
 /// repetitions of very common bytes done while processing the rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
