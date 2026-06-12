@@ -92,6 +92,7 @@ fn main() -> anyhow::Result<()> {
         Some(("compile", args)) => commands::exec_compile(args, &config),
         Some(("completion", args)) => commands::exec_completion(args),
         Some(("deps", args)) => commands::exec_deps(args),
+        Some(("diagnose", args)) => commands::exec_diagnose(args, &config),
         _ => unreachable!(),
     };
 
