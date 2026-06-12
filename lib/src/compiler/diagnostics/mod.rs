@@ -13,6 +13,8 @@ extracts trivially good atoms; they are only covered by the
 common-byte-repetition check.
 */
 
+pub(crate) mod hir_analysis;
+
 use yara_x_parser::Span;
 
 /// Maximum number of sample atoms stored in [`AtomStats::samples`].
@@ -177,6 +179,7 @@ pub enum Culprit {
 
 #[cfg(test)]
 mod tests {
+    use super::Culprit;
     use super::PatternDiagnostics;
     use super::SlowReason;
     use crate::Compiler;
@@ -312,5 +315,16 @@ mod tests {
             SlowReason::from_atom_sizes(std::iter::repeat(3).take(5000)),
             None
         );
+    }
+
+    #[test]
+    fn records_culprits() {
+        let diags = diagnostics_for(
+            r#"rule test { strings: $a = /[A-Za-z]{2,}/ condition: $a }"#,
+        );
+        assert!(diags[0].culprits.iter().any(|c| matches!(
+            c,
+            Culprit::LargeClassRepetition { class_size: 52, .. }
+        )));
     }
 }

@@ -2569,6 +2569,7 @@ impl Compiler<'_> {
     /// `pattern_diagnostics_enabled` is true.
     fn record_pattern_diagnostics(
         &mut self,
+        hir: &re::hir::Hir,
         re_atoms: &[re::RegexpAtom],
         slow_reason: Option<diagnostics::SlowReason>,
         span: Span,
@@ -2610,7 +2611,7 @@ impl Compiler<'_> {
                 exact_count,
                 samples,
             }),
-            culprits: Vec::new(), // populated in the next task
+            culprits: diagnostics::hir_analysis::find_culprits(hir.inner()),
         });
     }
 
@@ -2664,6 +2665,7 @@ impl Compiler<'_> {
 
         if self.pattern_diagnostics_enabled {
             self.record_pattern_diagnostics(
+                hir,
                 &re_atoms,
                 slow_reason.clone(),
                 span.clone(),
