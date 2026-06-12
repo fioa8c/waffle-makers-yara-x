@@ -180,27 +180,84 @@ fn verdict(d: &PatternDiagnostics) -> String {
     }
 }
 
+/// Removes regex-engine flag-group wrappers like `(?-u:...)`, `(?u:...)`,
+/// `(?s:...)` or `(?i:...)` that `regex_syntax`'s HIR printer inserts but a
+/// YARA author never wrote, e.g. `(?-u:[A-Za-z]){2,}` -> `[A-Za-z]{2,}`.
+fn strip_flag_groups(expr: &str) -> String {
+    let bytes = expr.as_bytes();
+    let mut out = String::with_capacity(expr.len());
+    // Stack entry: true = this open paren belongs to a dropped flag group.
+    let mut stack: Vec<bool> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Track whether the current byte is preceded by an unescaped backslash.
+        let escaped = i > 0 && bytes[i - 1] == b'\\' && {
+            // Count consecutive preceding backslashes; odd count → escaped.
+            let n =
+                bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count();
+            n % 2 == 1
+        };
+
+        if !escaped && bytes[i] == b'(' {
+            // Detect `(?<flags>:` where <flags> is a non-empty run of [iusmx-].
+            let rest = &expr[i..];
+            let flag_len = rest
+                .strip_prefix("(?")
+                .and_then(|r| {
+                    r.find(':').filter(|&n| {
+                        n > 0 && r[..n].chars().all(|c| "iusmx-".contains(c))
+                    })
+                })
+                .map(|n| 2 + n + 1); // "(?".len() + flags.len() + ":".len()
+
+            if let Some(skip) = flag_len {
+                stack.push(true);
+                i += skip;
+                continue;
+            }
+            stack.push(false);
+            out.push('(');
+        } else if !escaped && bytes[i] == b')' {
+            if stack.pop() != Some(true) {
+                out.push(')');
+            }
+            // else: closing paren of a dropped flag group — skip it
+        } else {
+            // Push the next full Unicode scalar (handles multibyte chars).
+            let ch = expr[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
 fn culprit_text(c: &Culprit) -> String {
     match c {
         Culprit::UnboundedRepetitionAtEdge { leading, expr } => format!(
             "`{}` — unbounded repetition at the {} of the pattern prevents \
              atom anchoring",
-            expr,
+            strip_flag_groups(expr),
             if *leading { "start" } else { "end" }
         ),
         Culprit::LargeClassRepetition { class_size, min_rep, expr } => {
             format!(
-                "`{expr}` — repetition (min {min_rep}) of a \
+                "`{}` — repetition (min {min_rep}) of a \
                  {class_size}-element class forces every combination to \
-                 become an atom"
+                 become an atom",
+                strip_flag_groups(expr)
             )
         }
         Culprit::ShortAlternationBranch { min_branch_len, expr } => format!(
-            "`{expr}` — the shortest alternation branch is only \
-             {min_branch_len} byte(s), capping the atom length"
+            "`{}` — the shortest alternation branch is only \
+             {min_branch_len} byte(s), capping the atom length",
+            strip_flag_groups(expr)
         ),
         Culprit::NestedUnboundedRepetition { expr } => format!(
-            "`{expr}` — nested unbounded repetitions produce no usable atoms"
+            "`{}` — nested unbounded repetitions produce no usable atoms",
+            strip_flag_groups(expr)
         ),
         Culprit::ShortFixedRegion { len } => format!(
             "a fixed region of only {len} byte(s) sits next to an \
@@ -212,8 +269,9 @@ fn culprit_text(c: &Culprit) -> String {
 fn culprit_suggestion(c: &Culprit) -> &'static str {
     match c {
         Culprit::UnboundedRepetitionAtEdge { leading: true, .. } => {
-            "remove the leading repetition; YARA patterns are unanchored, \
-             so a leading `.*` adds nothing and hurts atom extraction"
+            "a repetition at the start of the pattern cannot be anchored; \
+             add fixed bytes before it, or if the whole pattern is one \
+             repetition, narrow the repeated class or raise its minimum count"
         }
         Culprit::UnboundedRepetitionAtEdge { leading: false, .. } => {
             "remove the trailing repetition or bound it (e.g. `{0,N}`)"
@@ -278,7 +336,10 @@ fn print_text(
     sources: &[CompiledSource],
 ) {
     let file_for = |idx: usize| -> &CompiledSource {
-        sources.iter().find(|s| idx < s.diags_so_far).unwrap()
+        sources
+            .iter()
+            .find(|s| idx < s.diags_so_far)
+            .expect("diagnostic index has no source file")
     };
 
     for (idx, d) in selected {
@@ -323,7 +384,10 @@ fn print_json(
     sources: &[CompiledSource],
 ) {
     let file_for = |idx: usize| -> &CompiledSource {
-        sources.iter().find(|s| idx < s.diags_so_far).unwrap()
+        sources
+            .iter()
+            .find(|s| idx < s.diags_so_far)
+            .expect("diagnostic index has no source file")
     };
     let entries: Vec<serde_json::Value> = selected
         .iter()
@@ -365,4 +429,23 @@ fn print_json(
         serde_json::to_string_pretty(&serde_json::Value::Array(entries))
             .unwrap()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_flag_groups;
+
+    #[test]
+    fn strips_flag_groups() {
+        assert_eq!(strip_flag_groups("(?-u:[A-Za-z]){2,}"), "[A-Za-z]{2,}");
+        assert_eq!(strip_flag_groups("(?s:.)*abc"), ".*abc");
+        assert_eq!(strip_flag_groups("(?i:(?-u:ab)|cd)"), "ab|cd");
+        // Non-flag groups are preserved.
+        assert_eq!(strip_flag_groups("(abc)+"), "(abc)+");
+        assert_eq!(strip_flag_groups("(?:abc)+"), "(?:abc)+");
+        // Escaped parens are literal.
+        assert_eq!(strip_flag_groups(r"\(?-u:x\)"), r"\(?-u:x\)");
+        // Plain text untouched.
+        assert_eq!(strip_flag_groups("abcd"), "abcd");
+    }
 }
