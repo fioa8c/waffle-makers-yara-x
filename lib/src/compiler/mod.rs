@@ -1245,6 +1245,7 @@ impl Compiler<'_> {
             sub_patterns_len: self.sub_patterns.len(),
             symbol_table_len: self.symbol_table.len(),
             fast_scan_patterns_len: self.fast_scan_patterns.len(),
+            pattern_diagnostics_len: self.pattern_diagnostics.len(),
         }
     }
 
@@ -1260,6 +1261,7 @@ impl Compiler<'_> {
         self.atoms.truncate(snapshot.atoms_len);
         self.symbol_table.truncate(snapshot.symbol_table_len);
         self.fast_scan_patterns.truncate(snapshot.fast_scan_patterns_len);
+        self.pattern_diagnostics.truncate(snapshot.pattern_diagnostics_len);
 
         // Pattern IDs that are >= next_pattern_id, are being discarded. Any pattern
         // or file size bound associated to such IDs must be removed.
@@ -1910,6 +1912,7 @@ impl Compiler<'_> {
                 pending_patterns.remove(pattern_id);
             }
         }
+        self.current_pattern_ident = None;
 
         // Create a new symbol of bool type for the rule.
         let new_symbol = Symbol::Rule {
@@ -3149,6 +3152,7 @@ struct Snapshot {
     sub_patterns_len: usize,
     symbol_table_len: usize,
     fast_scan_patterns_len: usize,
+    pattern_diagnostics_len: usize,
 }
 
 /// Represents a list of warnings.

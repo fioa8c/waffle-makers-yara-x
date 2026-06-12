@@ -249,6 +249,28 @@ mod tests {
     }
 
     #[test]
+    fn shared_pattern_recorded_once() {
+        let diags = diagnostics_for(
+            r#"
+            rule first { strings: $a = /abcd[0-9]efgh/ condition: $a }
+            rule second { strings: $a = /abcd[0-9]efgh/ condition: $a }
+            "#,
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule_name, "first");
+    }
+
+    #[test]
+    fn chained_pattern_records_one_entry_per_segment() {
+        let diags = diagnostics_for(
+            r#"rule test { strings: $a = { 01 02 0? 04 [0-2000] 05 06 0? 08 } condition: $a }"#,
+        );
+        assert_eq!(diags.len(), 2);
+        assert!(diags.iter().all(|d| d.pattern_ident == "$a"));
+        assert!(diags.iter().all(|d| d.rule_name == "test"));
+    }
+
+    #[test]
     fn slow_reason_from_atom_sizes() {
         assert_eq!(
             SlowReason::from_atom_sizes(std::iter::empty()),
