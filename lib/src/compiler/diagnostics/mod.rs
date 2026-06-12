@@ -1,7 +1,7 @@
 /*! Structured diagnostics about pattern slowness.
 
 When diagnostics collection is enabled with
-`Compiler::collect_pattern_diagnostics`, the compiler records one
+[`crate::Compiler::collect_pattern_diagnostics`], the compiler records one
 [`PatternDiagnostics`] entry per compiled regexp/hex pattern segment, built
 from the same extracted atoms used by the scanner. These records power the
 `yr diagnose` command.
@@ -67,11 +67,22 @@ pub enum SlowReason {
     /// A single zero-length atom was extracted. Extreme case.
     ZeroLengthAtom,
     /// The only extracted atom is shorter than 2 bytes.
-    SingleShortAtom { len: usize },
+    SingleShortAtom {
+        /// Length of the sole extracted atom.
+        len: usize,
+    },
     /// Multiple atoms, the shortest is below 2 bytes.
-    MinAtomTooShort { min: usize, count: usize },
+    MinAtomTooShort {
+        /// Length of the shortest atom.
+        min: usize,
+        /// Total number of atoms extracted.
+        count: usize,
+    },
     /// More than 2700 atoms, all exactly 2 bytes long.
-    TooManyShortAtoms { count: usize },
+    TooManyShortAtoms {
+        /// Total number of atoms extracted.
+        count: usize,
+    },
     /// The pattern is a repetition of a very common byte (e.g. `00`, `90`,
     /// `FF`) and is neither anchored nor modified by xor/fullword/base64.
     CommonByteRepetition,
@@ -121,23 +132,115 @@ impl SlowReason {
 pub enum Culprit {
     /// An unbounded repetition (`.*`, `.+`, `\w*`, ...) at the start or end
     /// of the pattern.
-    UnboundedRepetitionAtEdge { leading: bool, expr: String },
+    UnboundedRepetitionAtEdge {
+        /// `true` if the repetition is at the leading edge; `false` if trailing.
+        leading: bool,
+        /// Source text of the repetition sub-expression.
+        expr: String,
+    },
     /// A repetition of a large character class, e.g. `[A-Za-z]{2,}`. Forces
     /// every combination of class elements to become an atom.
-    LargeClassRepetition { class_size: usize, min_rep: u32, expr: String },
+    LargeClassRepetition {
+        /// Number of elements in the character class.
+        class_size: usize,
+        /// Minimum repetition count.
+        min_rep: u32,
+        /// Source text of the repetition sub-expression.
+        expr: String,
+    },
     /// An alternation where the shortest branch caps the minimum atom
     /// length, e.g. `(foobar|ab)`.
-    ShortAlternationBranch { min_branch_len: usize, expr: String },
+    ShortAlternationBranch {
+        /// Length (in bytes) of the shortest branch in the alternation.
+        min_branch_len: usize,
+        /// Source text of the alternation sub-expression.
+        expr: String,
+    },
     /// Nested unbounded repetitions, e.g. `(\w+)*`.
-    NestedUnboundedRepetition { expr: String },
+    NestedUnboundedRepetition {
+        /// Source text of the outer repetition sub-expression.
+        expr: String,
+    },
     /// A literal region shorter than the desired atom size sitting next to
     /// an arbitrary gap, typical of hex patterns like `{ 00 [1-10] 01 }`.
-    ShortFixedRegion { len: usize },
+    ShortFixedRegion {
+        /// Length of the fixed literal region in bytes.
+        len: usize,
+    },
 }
 
 #[cfg(test)]
 mod tests {
+    use super::PatternDiagnostics;
     use super::SlowReason;
+    use crate::Compiler;
+
+    fn diagnostics_for(src: &str) -> Vec<PatternDiagnostics> {
+        let mut compiler = Compiler::new();
+        compiler.collect_pattern_diagnostics(true);
+        compiler.add_source(src).unwrap();
+        compiler.pattern_diagnostics().to_vec()
+    }
+
+    #[test]
+    fn records_slow_regexp() {
+        let diags = diagnostics_for(
+            r#"rule test { strings: $a = /[A-Za-z]{2,}/ condition: $a }"#,
+        );
+        assert_eq!(diags.len(), 1);
+        let d = &diags[0];
+        assert_eq!(d.rule_name, "test");
+        assert_eq!(d.pattern_ident, "$a");
+        assert_eq!(
+            d.slow_reason,
+            Some(SlowReason::TooManyShortAtoms { count: 2704 })
+        );
+        let stats = d.atom_stats.as_ref().unwrap();
+        assert_eq!(stats.count, 2704);
+        assert_eq!(stats.min_len, 2);
+        assert_eq!(stats.max_len, 2);
+        assert_eq!(stats.samples.len(), super::MAX_SAMPLE_ATOMS);
+    }
+
+    #[test]
+    fn records_healthy_regexp() {
+        let diags = diagnostics_for(
+            r#"rule test { strings: $a = /abcdefgh/ condition: $a }"#,
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].slow_reason, None);
+        assert!(diags[0].atom_stats.as_ref().unwrap().min_len >= 2);
+    }
+
+    #[test]
+    fn records_common_byte_repetition() {
+        let diags = diagnostics_for(
+            r#"rule test { strings: $a = { 00 00 00 00 } condition: $a }"#,
+        );
+        // One record from the common-byte-repetition check, plus one from
+        // the regular compilation of the (hex) pattern.
+        let cbr: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.slow_reason == Some(SlowReason::CommonByteRepetition)
+            })
+            .collect();
+        assert_eq!(cbr.len(), 1);
+        assert_eq!(cbr[0].rule_name, "test");
+        assert_eq!(cbr[0].pattern_ident, "$a");
+        assert!(cbr[0].atom_stats.is_none());
+    }
+
+    #[test]
+    fn collection_disabled_by_default() {
+        let mut compiler = Compiler::new();
+        compiler
+            .add_source(
+                r#"rule test { strings: $a = /[A-Za-z]{2,}/ condition: $a }"#,
+            )
+            .unwrap();
+        assert!(compiler.pattern_diagnostics().is_empty());
+    }
 
     #[test]
     fn slow_reason_from_atom_sizes() {
