@@ -459,7 +459,8 @@ rule slow_a {
         .assert()
         .success();
 
-    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let out =
+        String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
 
     // Threshold-based skip: on under-powered hosts the rule may not cross
     // the 100ms cumulative threshold and no offender block will be printed.
@@ -474,7 +475,10 @@ rule slow_a {
         // structurally reliable, so we don't assert on it.
         assert!(out.contains(&large_path), "large.bin path should appear");
         assert!(out.contains(&small_path), "small.bin path should appear");
-        assert!(out.contains("Slowest files:"), "Slowest files: header must appear");
+        assert!(
+            out.contains("Slowest files:"),
+            "Slowest files: header must appear"
+        );
     } else {
         eprintln!(
             "note: profiling threshold not crossed on this host; \

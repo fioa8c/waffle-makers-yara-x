@@ -15,10 +15,10 @@ use itertools::Itertools;
 use yansi::Color::{Cyan, Green, Red, Yellow};
 use yansi::Paint;
 
-use yara_x::errors::ScanError;
-use yara_x::{MetaValue, Patterns, Rule, Rules, ScanOptions, Scanner};
 #[cfg(feature = "rules-profiling")]
 use yara_x::FileTime;
+use yara_x::errors::ScanError;
+use yara_x::{MetaValue, Patterns, Rule, Rules, ScanOptions, Scanner};
 
 use crate::commands::{
     compilation_args, compile_rules, get_external_vars,

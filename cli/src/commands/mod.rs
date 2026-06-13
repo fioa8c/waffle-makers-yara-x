@@ -3,6 +3,7 @@ mod compile;
 mod completion;
 mod debug;
 mod deps;
+mod diagnose;
 mod dump;
 mod fix;
 mod fmt;
@@ -14,6 +15,7 @@ pub use completion::*;
 #[cfg(feature = "debug-cmd")]
 pub use debug::*;
 pub use deps::*;
+pub use diagnose::*;
 pub use dump::*;
 pub use fix::*;
 pub use fmt::*;
@@ -75,6 +77,7 @@ pub fn cli() -> Command {
             commands::fix(),
             commands::completion(),
             commands::deps(),
+            commands::diagnose(),
         ])
 }
 

@@ -66,7 +66,9 @@ impl BoundedTopK {
 mod tests {
     use super::*;
 
-    fn d(ms: u64) -> Duration { Duration::from_millis(ms) }
+    fn d(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
 
     #[test]
     fn fewer_than_k_returns_all_sorted() {
@@ -84,7 +86,9 @@ mod tests {
     #[test]
     fn more_than_k_keeps_largest_k() {
         let mut h = BoundedTopK::new(3);
-        for (label, ms) in [("a", 100), ("b", 50), ("c", 400), ("d", 200), ("e", 300)] {
+        for (label, ms) in
+            [("a", 100), ("b", 50), ("c", 400), ("d", 200), ("e", 300)]
+        {
             h.insert(d(ms), label.into());
         }
         let v = h.sorted_snapshot();

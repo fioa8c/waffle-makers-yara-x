@@ -222,6 +222,11 @@ impl Hir {
         self.greedy
     }
 
+    /// Returns a reference to the underlying [`regex_syntax::hir::Hir`].
+    pub(crate) fn inner(&self) -> &regex_syntax::hir::Hir {
+        &self.inner
+    }
+
     #[inline]
     pub fn kind(&self) -> &HirKind {
         self.inner.kind()

@@ -16,7 +16,7 @@ use std::{env, fmt, fs, io, iter};
 
 use bitflags::bitflags;
 use bstr::{BStr, ByteSlice};
-use itertools::{Itertools, MinMaxResult, izip};
+use itertools::izip;
 #[cfg(feature = "logging")]
 use log::*;
 use regex_syntax::hir;
@@ -78,6 +78,7 @@ mod rules;
 mod tests;
 
 pub mod base64;
+pub mod diagnostics;
 pub mod errors;
 pub mod linters;
 pub mod warnings;
@@ -254,6 +255,18 @@ pub struct Compiler<'a> {
     /// If true, slow patterns produce an error instead of a warning. A slow
     /// pattern is one with atoms shorter than 2 bytes.
     error_on_slow_pattern: bool,
+
+    /// When true, the compiler records structured diagnostics about each
+    /// compiled regexp/hex pattern. See
+    /// [`Compiler::collect_pattern_diagnostics`].
+    pattern_diagnostics_enabled: bool,
+
+    /// Diagnostics recorded while `pattern_diagnostics_enabled` is true.
+    pattern_diagnostics: Vec<diagnostics::PatternDiagnostics>,
+
+    /// Identifier (e.g. `$a`) of the pattern currently being compiled.
+    /// Tracked only while `pattern_diagnostics_enabled` is true.
+    current_pattern_ident: Option<String>,
 
     /// If true, a slow loop produces an error instead of a warning. A slow
     /// rule is one where the upper bound of the loop is potentially large.
@@ -498,6 +511,9 @@ impl<'a> Compiler<'a> {
             relaxed_re_syntax: false,
             hoisting: false,
             error_on_slow_pattern: false,
+            pattern_diagnostics_enabled: false,
+            pattern_diagnostics: Vec::new(),
+            current_pattern_ident: None,
             error_on_slow_loop: false,
             next_pattern_id: PatternId(0),
             fast_scan_patterns: bitvec::vec::BitVec::new(),
@@ -1017,6 +1033,23 @@ impl<'a> Compiler<'a> {
         self
     }
 
+    /// When enabled, the compiler records structured diagnostics about every
+    /// compiled regexp and hex pattern: which slow-pattern heuristic fired
+    /// (if any), statistics about the extracted atoms, and the
+    /// sub-expressions that hurt atom extraction. Retrieve the records with
+    /// [`Compiler::pattern_diagnostics`]. Disabled by default.
+    pub fn collect_pattern_diagnostics(&mut self, yes: bool) -> &mut Self {
+        self.pattern_diagnostics_enabled = yes;
+        self
+    }
+
+    /// Returns the diagnostics recorded so far. Empty unless
+    /// [`Compiler::collect_pattern_diagnostics`] was enabled before calling
+    /// [`Compiler::add_source`].
+    pub fn pattern_diagnostics(&self) -> &[diagnostics::PatternDiagnostics] {
+        &self.pattern_diagnostics
+    }
+
     /// When enabled, potentially slow loops produce an error instead of a
     /// warning.
     ///
@@ -1212,6 +1245,7 @@ impl Compiler<'_> {
             sub_patterns_len: self.sub_patterns.len(),
             symbol_table_len: self.symbol_table.len(),
             fast_scan_patterns_len: self.fast_scan_patterns.len(),
+            pattern_diagnostics_len: self.pattern_diagnostics.len(),
         }
     }
 
@@ -1227,6 +1261,7 @@ impl Compiler<'_> {
         self.atoms.truncate(snapshot.atoms_len);
         self.symbol_table.truncate(snapshot.symbol_table_len);
         self.fast_scan_patterns.truncate(snapshot.fast_scan_patterns_len);
+        self.pattern_diagnostics.truncate(snapshot.pattern_diagnostics_len);
 
         // Pattern IDs that are >= next_pattern_id, are being discarded. Any pattern
         // or file size bound associated to such IDs must be removed.
@@ -1610,6 +1645,19 @@ impl Compiler<'_> {
                 if let Some(literal_bytes) = literal_bytes
                     && Self::common_byte_repetition(literal_bytes)
                 {
+                    if self.pattern_diagnostics_enabled {
+                        self.pattern_diagnostics
+                            .push(diagnostics::PatternDiagnostics {
+                            rule_name: rule.identifier.name.to_string(),
+                            pattern_ident: pat.identifier().name.to_string(),
+                            span: pat.span().clone(),
+                            slow_reason: Some(
+                                diagnostics::SlowReason::CommonByteRepetition,
+                            ),
+                            atom_stats: None,
+                            culprits: Vec::new(),
+                        });
+                    }
                     self.warnings.add(|| {
                         warnings::SlowPattern::build(
                             &self.report_builder,
@@ -1820,6 +1868,10 @@ impl Compiler<'_> {
         {
             if pending_patterns.contains(pattern_id) {
                 let pattern_span = pattern.span().clone();
+                if self.pattern_diagnostics_enabled {
+                    self.current_pattern_ident =
+                        Some(pattern.identifier().name.to_string());
+                }
                 match pattern.into_pattern() {
                     Pattern::Text(pattern) => {
                         self.c_literal_pattern(*pattern_id, pattern);
@@ -1860,6 +1912,7 @@ impl Compiler<'_> {
                 pending_patterns.remove(pattern_id);
             }
         }
+        self.current_pattern_ident = None;
 
         // Create a new symbol of bool type for the rule.
         let new_symbol = Symbol::Rule {
@@ -2511,6 +2564,57 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// Records a [`diagnostics::PatternDiagnostics`] entry for the pattern
+    /// segment that is currently being compiled. Only called when
+    /// `pattern_diagnostics_enabled` is true.
+    fn record_pattern_diagnostics(
+        &mut self,
+        hir: &re::hir::Hir,
+        re_atoms: &[re::RegexpAtom],
+        slow_reason: Option<diagnostics::SlowReason>,
+        span: Span,
+    ) {
+        let rule_name = self
+            .rules
+            .last()
+            .and_then(|rule| self.ident_pool.get(rule.ident_id))
+            .unwrap_or_default()
+            .to_string();
+
+        let mut min_len = usize::MAX;
+        let mut max_len = 0_usize;
+        let mut exact_count = 0_usize;
+        let mut samples = Vec::new();
+        for re_atom in re_atoms {
+            min_len = min_len.min(re_atom.atom.len());
+            max_len = max_len.max(re_atom.atom.len());
+            if re_atom.atom.is_exact() {
+                exact_count += 1;
+            }
+            if samples.len() < diagnostics::MAX_SAMPLE_ATOMS {
+                samples.push(re_atom.atom.as_ref().to_vec());
+            }
+        }
+
+        self.pattern_diagnostics.push(diagnostics::PatternDiagnostics {
+            rule_name,
+            pattern_ident: self
+                .current_pattern_ident
+                .clone()
+                .unwrap_or_default(),
+            span,
+            slow_reason,
+            atom_stats: Some(diagnostics::AtomStats {
+                count: re_atoms.len(),
+                min_len: if re_atoms.is_empty() { 0 } else { min_len },
+                max_len,
+                exact_count,
+                samples,
+            }),
+            culprits: diagnostics::hir_analysis::find_culprits(hir.inner()),
+        });
+    }
+
     fn c_regexp(
         &mut self,
         hir: &re::hir::Hir,
@@ -2555,36 +2659,31 @@ impl Compiler<'_> {
             ));
         }
 
-        let (slow_pattern, note) =
-            match re_atoms.iter().map(|re_atom| re_atom.atom.len()).minmax() {
-                // No atoms, slow pattern.
-                MinMaxResult::NoElements => (true, None),
-                // Only one atom of len 0.
-                MinMaxResult::OneElement(0) => (
-                    true,
-                    Some(
-                        "this is an exceptionally extreme case that may severely degrade scanning throughput"
-                            .to_string(),
-                    ),
-                ),
-                // Only one atom shorter than 2 bytes, slow pattern.
-                MinMaxResult::OneElement(len) if len < 2 => (true, None),
-                // More than one atom, at least one is shorter than 2 bytes.
-                MinMaxResult::MinMax(min, _) if min < 2 => (true, None),
-                // More than 2700 atoms, all with exactly 2 bytes.
-                // Why 2700?. The larger the number of atoms the higher the
-                // odds of finding one of them in the data, which slows down
-                // the scan. The regex [A-Za-z]{N,} (with N>=2) produces
-                // (26+26)^2 = 2704 atoms. So, 2700 is large enough, but
-                // produces a warning with the aforementioned regex.
-                MinMaxResult::MinMax(2, 2) if re_atoms.len() > 2700 => {
-                    (true, None)
-                }
-                // In all other cases the pattern is not slow.
-                _ => (false, None),
-            };
+        let slow_reason = diagnostics::SlowReason::from_atom_sizes(
+            re_atoms.iter().map(|re_atom| re_atom.atom.len()),
+        );
 
-        if slow_pattern {
+        if self.pattern_diagnostics_enabled {
+            self.record_pattern_diagnostics(
+                hir,
+                &re_atoms,
+                slow_reason.clone(),
+                span.clone(),
+            );
+        }
+
+        if let Some(reason) = &slow_reason {
+            let note = if matches!(
+                reason,
+                diagnostics::SlowReason::ZeroLengthAtom
+            ) {
+                Some(
+                    "this is an exceptionally extreme case that may severely degrade scanning throughput"
+                        .to_string(),
+                )
+            } else {
+                None
+            };
             if self.error_on_slow_pattern {
                 return Err(errors::SlowPattern::build(
                     &self.report_builder,
@@ -3055,6 +3154,7 @@ struct Snapshot {
     sub_patterns_len: usize,
     symbol_table_len: usize,
     fast_scan_patterns_len: usize,
+    pattern_diagnostics_len: usize,
 }
 
 /// Represents a list of warnings.
