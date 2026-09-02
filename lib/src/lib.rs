@@ -66,13 +66,13 @@ pub use models::PatternKind;
 pub use models::Patterns;
 pub use models::Rule;
 pub use modules::mods;
+#[cfg(feature = "rules-profiling")]
+pub use scanner::FileTime;
 pub use scanner::MatchingRules;
 pub use scanner::ModuleOutputs;
 pub use scanner::NonMatchingRules;
 #[cfg(feature = "rules-profiling")]
 pub use scanner::ProfilingData;
-#[cfg(feature = "rules-profiling")]
-pub use scanner::FileTime;
 pub use scanner::ScanError;
 pub use scanner::ScanOptions;
 pub use scanner::ScanResults;
@@ -120,6 +120,15 @@ pub mod errors {
 pub mod warnings {
     //! Warnings returned while compiling rules.
     pub use crate::compiler::warnings::*;
+}
+
+pub mod diagnostics {
+    //! Structured pattern-slowness diagnostics.
+    //!
+    //! See [`crate::Compiler::collect_pattern_diagnostics`].
+    pub use crate::compiler::diagnostics::{
+        AtomStats, Culprit, MAX_SAMPLE_ATOMS, PatternDiagnostics, SlowReason,
+    };
 }
 
 mod utils {

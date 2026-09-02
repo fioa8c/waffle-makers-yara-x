@@ -227,8 +227,7 @@ pub struct ScanContext<'r, 'd> {
     /// `(time spent on this scan, label)` pair. The inner heap does not
     /// allocate until the first insertion.
     #[cfg(feature = "rules-profiling")]
-    pub top_offenders_per_rule:
-        Vec<BoundedTopK>,
+    pub top_offenders_per_rule: Vec<BoundedTopK>,
     /// Global bounded top-K min-heap (capacity 10) holding the labels of the
     /// scans that took the most total time (sum of all per-rule deltas).
     #[cfg(feature = "rules-profiling")]
