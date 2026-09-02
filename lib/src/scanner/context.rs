@@ -5,6 +5,7 @@ use std::iter;
 use std::mem::{MaybeUninit, transmute};
 #[cfg(feature = "rules-profiling")]
 use std::ops::AddAssign;
+use std::ops::ControlFlow;
 use std::ops::{Deref, Range};
 use std::pin::Pin;
 use std::ptr::NonNull;
@@ -28,15 +29,17 @@ use crate::compiler::{
     SubPatternAtom, SubPatternFlags, SubPatternId,
 };
 use crate::errors::VariableError;
-use crate::re::Action;
 use crate::re::fast::FastVM;
+
 use crate::re::hir::ChainedPatternGap;
 use crate::re::thompson::PikeVM;
 #[cfg(feature = "rules-profiling")]
 use crate::scanner::ProfilingData;
+use crate::scanner::matches::{
+    AddResult, Match, PatternMatches, UnconfirmedMatch,
+};
 #[cfg(feature = "rules-profiling")]
 use crate::scanner::profiling::BoundedTopK;
-use crate::scanner::matches::{Match, PatternMatches, UnconfirmedMatch};
 use crate::scanner::{DataSnippets, ScanError, ScannedData};
 use crate::scanner::{HEARTBEAT_COUNTER, INIT_HEARTBEAT};
 use crate::types::{Array, Map, Struct, TypeValue};
@@ -46,6 +49,16 @@ use crate::wasm::runtime::{
     Mutability, Store, TypedFunc, Val, ValType,
 };
 use crate::{Variable, wasm};
+
+#[cfg(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    )
+))]
+use crate::teddy;
 
 /// Represents the states in which a scanner can be.
 pub(crate) enum ScanState<'a> {
@@ -64,11 +77,25 @@ impl<'a> ScanState<'a> {
     }
 }
 
+/// Tracks the matches found during a scan.
 pub(crate) struct MatchTracker<'r> {
+    /// Contains the matches found so far.
     pub pattern_matches: PatternMatches,
+    /// Contains matches for subpatterns that are part of a chain but
+    /// the whole chain has not been confirmed yet
     pub unconfirmed_matches: FxHashMap<SubPatternId, Vec<UnconfirmedMatch>>,
-    pub limit_reached: FxHashSet<PatternId>,
+    /// Patterns that have been disabled, either because they have reached
+    /// the maximum number of matches or because they are meant to be ignored
+    /// during this scan because they belong to some rule that we know that
+    /// can't match.
+    pub disabled_patterns: FxHashSet<PatternId>,
+    /// The rules that are being used during the scan.
     pub compiled_rules: &'r Rules,
+    /// Indicates whether fast mode is enabled. In fast mode the scanner
+    /// only looks for the first match of each pattern, unless the condition
+    /// requires tracking all the matches (i.e: the condition relies on the
+    /// total number of matches). The drawback is that the user can't retrieve
+    /// all the matches for a give pattern.
     pub fast_scan: bool,
 }
 
@@ -173,9 +200,6 @@ pub struct ScanContext<'r, 'd> {
     pub(crate) console_log: Option<Box<dyn FnMut(String) + 'r>>,
     /// Virtual Machines used for executing regexps.
     pub(crate) vm: VM<'r>,
-    /// Patterns that are disabled for the current scan (e.g. because they don't
-    /// comply with filesize bounds or header constraints).
-    pub(crate) disabled_patterns: FxHashSet<PatternId>,
     /// Hash map that tracks the time spend on each pattern. Keys are pattern
     /// PatternIds and values are the cumulative time spent on verifying each
     /// pattern.
@@ -653,12 +677,8 @@ impl ScanContext<'_, '_> {
         // Free all runtime objects left around by previous scans.
         self.runtime_objects.clear();
 
-        // Clear the set that tracks the disabled patterns.
-        self.disabled_patterns.clear();
-
-        // Clear the array that tracks the patterns that reached the maximum
-        // number of patterns.
-        self.tracker.limit_reached.clear();
+        // Clear the set that tracks the patterns that has been disabled.
+        self.tracker.disabled_patterns.clear();
 
         self.tracker.unconfirmed_matches.clear();
         self.num_matching_private_rules = 0;
@@ -836,7 +856,7 @@ impl ScanContext<'_, '_> {
         let rule = self.compiled_rules.get(rule_id);
 
         #[cfg(feature = "logging")]
-        log::info!(
+        log::debug!(
             "Rule match: {}:{}  {:?}",
             self.compiled_rules
                 .ident_pool()
@@ -889,24 +909,37 @@ impl ScanContext<'_, '_> {
             // Use the Teddy algorithm if it was possible to create a Teddy
             // matcher and the data being scanned is long enough.
             Some(teddy) if data.len() >= teddy.minimum_len() => {
-                if HEARTBEAT_COUNTER.load(Ordering::Relaxed) >= self.deadline {
-                    return Err(ScanError::Timeout);
-                }
-                teddy.find_overlapping(data, 0, &mut |m| {
-                    #[cfg(feature = "logging")]
-                    {
-                        atom_matches += 1;
-                    }
-                    let match_offset =
-                        m.start() as usize - data.as_ptr() as usize;
+                match teddy.find_overlapping(
+                    data,
+                    0,
+                    |m| -> ControlFlow<ScanError> {
+                        if HEARTBEAT_COUNTER.load(Ordering::Relaxed)
+                            >= self.deadline
+                        {
+                            return ControlFlow::Break(ScanError::Timeout);
+                        }
+                        #[cfg(feature = "logging")]
+                        {
+                            atom_matches += 1;
+                        }
+                        let match_offset =
+                            m.start() as usize - data.as_ptr() as usize;
 
-                    self.handle_atom_match(
-                        m.pattern() as usize,
-                        match_offset,
-                        base,
-                        data,
-                    );
-                });
+                        self.handle_atom_match(
+                            m.pattern() as usize,
+                            match_offset,
+                            base,
+                            data,
+                        );
+
+                        ControlFlow::Continue(())
+                    },
+                ) {
+                    ControlFlow::Continue(_) => {}
+                    ControlFlow::Break(err) => {
+                        return Err(err);
+                    }
+                }
             }
             // Otherwise use the Aho-Corasick algorithm.
             _ => {
@@ -962,11 +995,7 @@ impl ScanContext<'_, '_> {
         let (pattern_id, sub_pattern) =
             &self.compiled_rules.get_sub_pattern(sub_pattern_id);
 
-        if self.disabled_patterns.contains(pattern_id) {
-            return;
-        }
-
-        if self.tracker.limit_reached.contains(pattern_id) {
+        if self.tracker.disabled_patterns.contains(pattern_id) {
             return;
         }
 
@@ -979,6 +1008,7 @@ impl ScanContext<'_, '_> {
                 SubPattern::Literal { flags, .. }
                 | SubPattern::LiteralChainHead { flags, .. }
                 | SubPattern::LiteralChainTail { flags, .. }
+                | SubPattern::LiteralWithMask { flags, .. }
                 | SubPattern::Regexp { flags, .. }
                 | SubPattern::RegexpChainHead { flags, .. }
                 | SubPattern::RegexpChainTail { flags, .. } => flags,
@@ -998,6 +1028,20 @@ impl ScanContext<'_, '_> {
                 );
             }
 
+            #[cfg(feature = "rules-profiling")]
+            {
+                let time_spent = self
+                    .clock
+                    .delta_as_nanos(verification_start, self.clock.raw());
+
+                self.time_spent_in_pattern
+                    .entry(*pattern_id)
+                    .and_modify(|t| {
+                        t.add_assign(time_spent);
+                    })
+                    .or_insert(time_spent);
+            }
+
             return;
         }
 
@@ -1011,7 +1055,7 @@ impl ScanContext<'_, '_> {
                     .get_bytes(*pattern)
                     .unwrap();
 
-                if verify_literal_match(pattern, data, atom_pos, *flags) {
+                if verify_literal(pattern, data, atom_pos, *flags) {
                     handle_sub_pattern_match(
                         &mut self.tracker,
                         &mut self.wasm,
@@ -1023,16 +1067,28 @@ impl ScanContext<'_, '_> {
                     );
                 }
             }
-            SubPattern::Regexp { flags, .. }
-            | SubPattern::RegexpChainHead { flags, .. }
-            | SubPattern::RegexpChainTail { flags, .. } => {
-                verify_regexp_match(
-                    &mut self.vm,
-                    data,
-                    atom_pos,
-                    atom,
-                    *flags,
-                    |match_range| {
+            SubPattern::LiteralWithMask { pattern, mask, flags } => {
+                let pattern = self
+                    .compiled_rules
+                    .lit_pool()
+                    .get_bytes(*pattern)
+                    .unwrap();
+
+                let mask =
+                    self.compiled_rules.lit_pool().get_bytes(*mask).unwrap();
+
+                debug_assert_eq!(pattern.len(), mask.len());
+
+                if let Some(data) =
+                    data.get(atom_pos..atom_pos + pattern.len())
+                    && verify_literal_with_mask(data, pattern, mask)
+                {
+                    let match_range = atom_pos..atom_pos + pattern.len();
+                    if !flags.intersects(
+                        SubPatternFlags::FullwordLeft
+                            | SubPatternFlags::FullwordRight,
+                    ) || verify_full_word(data, &match_range, *flags, None)
+                    {
                         handle_sub_pattern_match(
                             &mut self.tracker,
                             &mut self.wasm,
@@ -1041,9 +1097,28 @@ impl ScanContext<'_, '_> {
                             *pattern_id,
                             Match::new(match_range).rebase(base),
                         );
-                    },
-                )
+                    }
+                }
             }
+            SubPattern::Regexp { flags, .. }
+            | SubPattern::RegexpChainHead { flags, .. }
+            | SubPattern::RegexpChainTail { flags, .. } => verify_regexp(
+                &mut self.vm,
+                data,
+                atom_pos,
+                atom,
+                *flags,
+                |match_range| {
+                    handle_sub_pattern_match(
+                        &mut self.tracker,
+                        &mut self.wasm,
+                        sub_pattern_id,
+                        sub_pattern,
+                        *pattern_id,
+                        Match::new(match_range).rebase(base),
+                    );
+                },
+            ),
 
             SubPattern::Xor { pattern, flags } => {
                 let pattern = self
@@ -1053,7 +1128,7 @@ impl ScanContext<'_, '_> {
                     .unwrap();
 
                 if let Some(key) =
-                    verify_xor_match(pattern, data, atom_pos, atom, *flags)
+                    verify_xor(pattern, data, atom_pos, atom, *flags)
                 {
                     handle_sub_pattern_match(
                         &mut self.tracker,
@@ -1070,7 +1145,7 @@ impl ScanContext<'_, '_> {
 
             SubPattern::Base64 { pattern, padding }
             | SubPattern::Base64Wide { pattern, padding } => {
-                if let Some(match_range) = verify_base64_match(
+                if let Some(match_range) = verify_base64(
                     self.compiled_rules
                         .lit_pool()
                         .get_bytes(*pattern)
@@ -1113,7 +1188,7 @@ impl ScanContext<'_, '_> {
                     },
                 );
 
-                if let Some(match_range) = verify_base64_match(
+                if let Some(match_range) = verify_base64(
                     self.compiled_rules
                         .lit_pool()
                         .get_bytes(*pattern)
@@ -1166,6 +1241,9 @@ impl ScanContext<'_, '_> {
     /// In case of timeout, this function returns [ScanError::Timeout] and sets
     /// the scan state to [ScanState::Timeout].
     pub(crate) fn search_for_patterns(&mut self) -> Result<(), ScanError> {
+        #[cfg(any(feature = "rules-profiling", feature = "logging"))]
+        let scan_start = self.clock.raw();
+
         // Take ownership of the scan state, while searching for
         // the patterns, `self.scan_state` is left as `Idle`.
         let state = self.scan_state.take();
@@ -1178,31 +1256,22 @@ impl ScanContext<'_, '_> {
 
         if !block_scanning_mode {
             let filesize = self.get_filesize();
-            for pattern_id in 0..self.compiled_rules.num_patterns() {
-                let pattern_id = PatternId::from(pattern_id);
-                if let Some(bounds) =
-                    self.compiled_rules.filesize_bounds(pattern_id)
-                    && !bounds.contains(filesize)
-                {
-                    self.disabled_patterns.insert(pattern_id);
+            for (pattern_id, bounds) in self.compiled_rules.filesize_bounds() {
+                if !bounds.contains(filesize) {
+                    self.tracker.disabled_patterns.insert(*pattern_id);
                 }
             }
         }
 
         if base == 0 {
-            for pattern_id in 0..self.compiled_rules.num_patterns() {
-                let pattern_id = PatternId::from(pattern_id);
-                if let Some(constraints) =
-                    self.compiled_rules.header_constraints(pattern_id)
-                    && !constraints.is_satisfied(data)
-                {
-                    self.disabled_patterns.insert(pattern_id);
+            for (pattern_id, constraints) in
+                self.compiled_rules.header_constraints()
+            {
+                if !constraints.is_satisfied(data) {
+                    self.tracker.disabled_patterns.insert(*pattern_id);
                 }
             }
         }
-
-        #[cfg(any(feature = "rules-profiling", feature = "logging"))]
-        let scan_start = self.clock.raw();
 
         // Verify the anchored pattern first. These are patterns that can
         // match at a single known offset within the data.
@@ -1255,11 +1324,10 @@ impl ScanContext<'_, '_> {
             .anchored_sub_patterns()
             .iter()
             .map(|id| (id, self.compiled_rules.get_sub_pattern(*id)))
-            // Disabled patterns are ignored.
-            .filter(|(_, (pattern_id, _))| {
-                !self.disabled_patterns.contains(pattern_id)
-            })
         {
+            if self.tracker.disabled_patterns.contains(pattern_id) {
+                continue;
+            }
             match sub_pattern {
                 SubPattern::Literal {
                     pattern,
@@ -1277,8 +1345,7 @@ impl ScanContext<'_, '_> {
                             .get_bytes(*pattern)
                             .unwrap();
 
-                        if verify_literal_match(pattern, data, offset, *flags)
-                        {
+                        if verify_literal(pattern, data, offset, *flags) {
                             handle_sub_pattern_match(
                                 &mut self.tracker,
                                 &mut self.wasm,
@@ -1298,7 +1365,7 @@ impl ScanContext<'_, '_> {
 }
 
 /// Verifies if a literal `pattern` matches at `match_start` in `scanned_data`.
-fn verify_literal_match(
+fn verify_literal(
     pattern: &[u8],
     scanned_data: &[u8],
     match_start: usize,
@@ -1327,6 +1394,104 @@ fn verify_literal_match(
         pattern.eq_ignore_ascii_case(&scanned_data[match_start..match_end])
     } else {
         &scanned_data[match_start..match_end] == pattern.as_bytes()
+    }
+}
+
+#[cfg(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    )
+))]
+#[inline(always)]
+unsafe fn verify_literal_with_mask_simd<V: teddy::vector::Vector>(
+    data: &[u8],
+    pattern: &[u8],
+    mask: &[u8],
+) -> bool {
+    let len = data.len();
+    debug_assert!(len <= u16::MAX as usize);
+
+    unsafe {
+        if len <= 16 {
+            let mut d_bytes = [0_u8; 16];
+            let mut m_bytes = [0_u8; 16];
+            let mut p_bytes = [0_u8; 16];
+
+            d_bytes[..len].copy_from_slice(data);
+            p_bytes[..len].copy_from_slice(&pattern[..len]);
+            m_bytes[..len].copy_from_slice(&mask[..len]);
+
+            let data = V::load_unaligned(d_bytes.as_ptr());
+            let pattern = V::load_unaligned(p_bytes.as_ptr());
+            let mask = V::load_unaligned(m_bytes.as_ptr());
+            let eq = data.and(mask).cmpeq(pattern);
+
+            eq.cmpeq(V::splat(0x00)).is_zero()
+        } else {
+            let verify_chunk = |offset: usize| -> bool {
+                let data = V::load_unaligned(data[offset..].as_ptr());
+                let pattern = V::load_unaligned(pattern[offset..].as_ptr());
+                let mask = V::load_unaligned(mask[offset..].as_ptr());
+                let eq = data.and(mask).cmpeq(pattern);
+
+                eq.cmpeq(V::splat(0x00)).is_zero()
+            };
+
+            let mut offset = 0;
+
+            while offset + 16 <= len {
+                if !verify_chunk(offset) {
+                    return false;
+                }
+                offset += 16;
+            }
+
+            if offset < len && !verify_chunk(len - 16) {
+                return false;
+            }
+
+            true
+        }
+    }
+}
+
+fn verify_literal_with_mask(data: &[u8], pattern: &[u8], mask: &[u8]) -> bool {
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    unsafe {
+        verify_literal_with_mask_simd::<core::arch::x86_64::__m128i>(
+            data, pattern, mask,
+        )
+    }
+
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    ))]
+    unsafe {
+        verify_literal_with_mask_simd::<core::arch::aarch64::uint8x16_t>(
+            data, pattern, mask,
+        )
+    }
+
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little"
+        )
+    )))]
+    {
+        for ((&d, &m), &t) in data.iter().zip(mask).zip(pattern) {
+            if (d & m) != t {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -1398,7 +1563,7 @@ fn verify_chain_of_matches(
         match &tracker.compiled_rules.get_sub_pattern(id).1 {
             SubPattern::LiteralChainHead { flags, .. }
             | SubPattern::RegexpChainHead { flags, .. } => {
-                track_pattern_match(
+                track_match(
                     tracker,
                     wasm_state,
                     pattern_id,
@@ -1472,7 +1637,7 @@ fn verify_chain_of_matches(
 ///
 /// This function can produce multiple matches, `f` is called for every
 /// match found.
-fn verify_regexp_match(
+fn verify_regexp(
     vm: &mut VM,
     scanned_data: &[u8],
     match_start: usize,
@@ -1496,9 +1661,9 @@ fn verify_regexp_match(
                 |match_len| {
                     fwd_match_len = Some(match_len);
                     if flags.contains(SubPatternFlags::GreedyRegexp) {
-                        Action::Continue
+                        ControlFlow::Continue(())
                     } else {
-                        Action::Stop
+                        ControlFlow::Break(())
                     }
                 },
             );
@@ -1510,7 +1675,7 @@ fn verify_regexp_match(
                 flags.contains(SubPatternFlags::Wide),
                 |match_len| {
                     fwd_match_len = Some(match_len);
-                    Action::Stop
+                    ControlFlow::Break(())
                 },
             );
         }
@@ -1535,7 +1700,7 @@ fn verify_regexp_match(
                     if verify_full_word(scanned_data, &range, flags, None) {
                         f(range);
                     }
-                    Action::Continue
+                    ControlFlow::Continue(())
                 },
             );
         } else {
@@ -1550,7 +1715,7 @@ fn verify_regexp_match(
                     if verify_full_word(scanned_data, &range, flags, None) {
                         f(range);
                     }
-                    Action::Continue
+                    ControlFlow::Continue(())
                 },
             );
         }
@@ -1566,7 +1731,7 @@ fn verify_regexp_match(
 /// within `scanned_data`.
 ///
 /// Returns the XOR key if the match was confirmed, or [`None`] if otherwise.
-fn verify_xor_match(
+fn verify_xor(
     pattern: &[u8],
     scanned_data: &[u8],
     match_start: usize,
@@ -1652,7 +1817,7 @@ fn xor_slices_eq(pattern: &[u8], candidate: &[u8], key: u8) -> bool {
 /// within `scanned_data`.
 ///
 /// Returns the range where the match was found or [`None`] if otherwise.
-fn verify_base64_match(
+fn verify_base64(
     pattern: &[u8],
     scanned_data: &[u8],
     padding: usize,
@@ -1803,17 +1968,16 @@ fn handle_sub_pattern_match(
 ) {
     match sub_pattern {
         SubPattern::Literal { .. }
+        | SubPattern::LiteralWithMask { .. }
         | SubPattern::Xor { .. }
         | SubPattern::Base64 { .. }
         | SubPattern::Base64Wide { .. }
         | SubPattern::CustomBase64 { .. }
         | SubPattern::CustomBase64Wide { .. } => {
-            track_pattern_match(
-                tracker, wasm_state, pattern_id, match_, false,
-            );
+            track_match(tracker, wasm_state, pattern_id, match_, false);
         }
         SubPattern::Regexp { flags, .. } => {
-            track_pattern_match(
+            track_match(
                 tracker,
                 wasm_state,
                 pattern_id,
@@ -1822,11 +1986,13 @@ fn handle_sub_pattern_match(
             );
         }
         SubPattern::LiteralChainHead { .. }
-        | SubPattern::RegexpChainHead { .. } => tracker
-            .unconfirmed_matches
-            .entry(sub_pattern_id)
-            .or_default()
-            .push(UnconfirmedMatch { range: match_.range, chain_length: 0 }),
+        | SubPattern::RegexpChainHead { .. } => {
+            track_unconfirmed_match(
+                tracker,
+                sub_pattern_id,
+                UnconfirmedMatch { range: match_.range, chain_length: 0 },
+            );
+        }
         SubPattern::LiteralChainTail { chained_to, gap, flags, .. }
         | SubPattern::RegexpChainTail { chained_to, gap, flags, .. } => {
             if within_valid_distance(
@@ -1844,21 +2010,53 @@ fn handle_sub_pattern_match(
                         match_,
                     );
                 } else {
-                    tracker
-                        .unconfirmed_matches
-                        .entry(sub_pattern_id)
-                        .or_default()
-                        .push(UnconfirmedMatch {
+                    track_unconfirmed_match(
+                        tracker,
+                        sub_pattern_id,
+                        UnconfirmedMatch {
                             range: match_.range,
                             chain_length: 0,
-                        });
+                        },
+                    );
                 }
             }
         }
     }
 }
 
-fn track_pattern_match(
+#[inline]
+fn track_unconfirmed_match(
+    tracker: &mut MatchTracker,
+    sub_pattern_id: SubPatternId,
+    unconfirmed_match: UnconfirmedMatch,
+) {
+    let unconfirmed_matches =
+        tracker.unconfirmed_matches.entry(sub_pattern_id).or_default();
+
+    unconfirmed_matches.push(unconfirmed_match);
+
+    #[cfg(feature = "logging")]
+    if unconfirmed_matches.len() % 100_000 == 0 {
+        let (rule, pattern) = tracker
+            .compiled_rules
+            .get_rule_and_pattern_by_sub_pattern_id(sub_pattern_id)
+            .unwrap();
+
+        log::warn!(
+            "Pattern `{}` in rule `{}:{}` grew to {} unconfirmed matches",
+            tracker.compiled_rules.ident_pool().get(pattern.ident_id).unwrap(),
+            tracker
+                .compiled_rules
+                .ident_pool()
+                .get(rule.namespace_ident_id)
+                .unwrap(),
+            tracker.compiled_rules.ident_pool().get(rule.ident_id).unwrap(),
+            unconfirmed_matches.len()
+        );
+    }
+}
+
+fn track_match(
     tracker: &mut MatchTracker,
     wasm_state: &mut WasmState,
     pattern_id: PatternId,
@@ -1877,13 +2075,47 @@ fn track_pattern_match(
 
     bits.set(pattern_id.into(), true);
 
-    let added =
-        tracker.pattern_matches.add(pattern_id, match_, replace_if_longer);
-    if !added
-        || (tracker.fast_scan
-            && tracker.compiled_rules.is_fast_scan(pattern_id))
-    {
-        tracker.limit_reached.insert(pattern_id);
+    // If we are in fast scan mode, and this pattern is suitable to be disabled
+    // in fast scan mode, disabled it because we already found the first match.
+    let mut disable_pattern =
+        tracker.fast_scan && tracker.compiled_rules.is_fast_scan(pattern_id);
+
+    match tracker.pattern_matches.add(pattern_id, match_, replace_if_longer) {
+        #[cfg(feature = "logging")]
+        AddResult::Inserted(len) if len % 100_000 == 0 => {
+            let (rule, pattern) = tracker
+                .compiled_rules
+                .get_rule_and_pattern_by_pattern_id(pattern_id)
+                .unwrap();
+
+            log::warn!(
+                "Pattern `{}` in rule `{}:{}` grew to {} matches",
+                tracker
+                    .compiled_rules
+                    .ident_pool()
+                    .get(pattern.ident_id)
+                    .unwrap(),
+                tracker
+                    .compiled_rules
+                    .ident_pool()
+                    .get(rule.namespace_ident_id)
+                    .unwrap(),
+                tracker
+                    .compiled_rules
+                    .ident_pool()
+                    .get(rule.ident_id)
+                    .unwrap(),
+                len
+            );
+        }
+        AddResult::MaxMatchesReached => {
+            disable_pattern = true;
+        }
+        _ => {}
+    }
+
+    if disable_pattern {
+        tracker.disabled_patterns.insert(pattern_id);
     }
 }
 
@@ -2015,6 +2247,8 @@ impl From<i64> for RuntimeObjectHandle {
 pub fn create_wasm_store_and_ctx<'r>(
     rules: &'r Rules,
 ) -> Pin<Box<Store<ScanContext<'static, 'static>>>> {
+    crate::init_logger();
+
     let num_rules = rules.num_rules() as u32;
     let num_patterns = rules.num_patterns() as u32;
 
@@ -2044,7 +2278,7 @@ pub fn create_wasm_store_and_ctx<'r>(
         tracker: MatchTracker {
             pattern_matches: PatternMatches::new(),
             unconfirmed_matches: FxHashMap::default(),
-            limit_reached: FxHashSet::default(),
+            disabled_patterns: FxHashSet::default(),
             compiled_rules: rules,
             fast_scan: false,
         },
@@ -2055,7 +2289,6 @@ pub fn create_wasm_store_and_ctx<'r>(
             pike_vm: PikeVM::new(rules.re_code()),
             fast_vm: FastVM::new(rules.re_code()),
         },
-        disabled_patterns: FxHashSet::default(),
         custom_base64_engine_cache: Vec::new(),
         #[cfg(feature = "rules-profiling")]
         time_spent_in_pattern: FxHashMap::default(),

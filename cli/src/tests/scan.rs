@@ -33,6 +33,21 @@ fn negate() {
 }
 
 #[test]
+fn scan_list_from_stdin() {
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--count")
+        .arg("--scan-list")
+        .arg("--threads=1")
+        .arg("src/tests/testdata/foo.yar")
+        .arg("-")
+        .write_stdin("src/tests/testdata/dummy.file\n")
+        .assert()
+        .success()
+        .stdout("src/tests/testdata/dummy.file: 1\n");
+}
+
+#[test]
 fn filter_by_tag() {
     Command::new(cargo_bin!("yr"))
         .arg("scan")
@@ -513,4 +528,42 @@ fn cpu_limit() {
         .arg("src/tests/testdata/dummy.file")
         .assert()
         .success();
+}
+
+#[test]
+fn ignore_invalid_rules() {
+    let temp_dir = TempDir::new().unwrap();
+    let yar_file = temp_dir.child("test.yar");
+
+    yar_file
+        .write_str(
+            r#"
+            rule valid_rule {
+                condition: true
+            }
+            rule invalid_rule {
+                condition: undefined_var == 1
+            }
+            "#,
+        )
+        .unwrap();
+
+    // Without --ignore-invalid-rules, scan should fail on compile error.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg(yar_file.path())
+        .arg("src/tests/testdata/dummy.file")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("1 error(s) found"));
+
+    // With --ignore-invalid-rules, scan should succeed and match valid_rule.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--ignore-invalid-rules")
+        .arg(yar_file.path())
+        .arg("src/tests/testdata/dummy.file")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid_rule"));
 }

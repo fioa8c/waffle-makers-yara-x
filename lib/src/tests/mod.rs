@@ -1262,31 +1262,59 @@ fn hex_patterns() {
     // https://github.com/VirusTotal/yara-x/issues/383
     pattern_match!(
         r#"{
-		    ( 2D A? FF FF FF  |
-		      81 E8 ( A? | B? | C? | D? ) FF  |
-		      81 E9 ( A? | B? | C? | D? ) FF  |
-		      81 EA ( A? | B? | C? | D? ) FF  |
-		      81 EB ( A? | B? | C? | D? ) FF  |
-		      81 ED ( A? | B? | C? | D? ) FF  |
-		      81 EE ( A? | B? | C? | D? ) FF  |
-		      81 EF ( A? | B? | C? | D? ) FF  |
-		      6A 2? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
-		      6A 3? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
-		      6A 4? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
-		      6A 5? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
-		      83 C0 ( 2? | 3? | 4? | 5? )  |
-		      83 C1 ( 2? | 3? | 4? | 5? )  |
-		      83 C2 ( 2? | 3? | 4? | 5? )  |
-		      83 C3 ( 2? | 3? | 4? | 5? )  |
-		      8D 40 ( 2? | 3? | 4? | 5? )  |
-		      8D 49 ( 2? | 3? | 4? | 5? )  |
-		      8D 6D ( 2? | 3? | 4? | 5? )  |
-		      8D 76 ( 2? | 3? | 4? | 5? )  |
-		      8D 7F ( 2? | 3? | 4? | 5? )
-		    )
-		}"#,
+            ( 2D A? FF FF FF  |
+              81 E8 ( A? | B? | C? | D? ) FF  |
+              81 E9 ( A? | B? | C? | D? ) FF  |
+              81 EA ( A? | B? | C? | D? ) FF  |
+              81 EB ( A? | B? | C? | D? ) FF  |
+              81 ED ( A? | B? | C? | D? ) FF  |
+              81 EE ( A? | B? | C? | D? ) FF  |
+              81 EF ( A? | B? | C? | D? ) FF  |
+              6A 2? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
+              6A 3? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
+              6A 4? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
+              6A 5? 03 ?? 24 ( 58 | 59 | 5A | 5B | 5D | 5E | 5F ) |
+              83 C0 ( 2? | 3? | 4? | 5? )  |
+              83 C1 ( 2? | 3? | 4? | 5? )  |
+              83 C2 ( 2? | 3? | 4? | 5? )  |
+              83 C3 ( 2? | 3? | 4? | 5? )  |
+              8D 40 ( 2? | 3? | 4? | 5? )  |
+              8D 49 ( 2? | 3? | 4? | 5? )  |
+              8D 6D ( 2? | 3? | 4? | 5? )  |
+              8D 76 ( 2? | 3? | 4? | 5? )  |
+              8D 7F ( 2? | 3? | 4? | 5? )
+            )
+        }"#,
         &[0x2D, 0xA0, 0xFF, 0xFF, 0xFF],
         &[0x2D, 0xA0, 0xFF, 0xFF, 0xFF]
+    );
+
+    pattern_match!(
+        r#"{ 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 ?? }"#,
+        &[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+            0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+        ],
+        &[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+            0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+        ]
+    );
+
+    pattern_false!(
+        r#"{ 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 ?? }"#,
+        &[
+            0x01, 0x02, 0x03, 0xff, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+            0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13
+        ]
+    );
+
+    pattern_false!(
+        r#"{ 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 ?? }"#,
+        &[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+            0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12,
+        ]
     );
 }
 
@@ -3380,6 +3408,36 @@ fn filesize_bounds() {
         1 // test_2 matches, but test_1 do not.
     );
 
+    // Compare filesize with float.
+    let rules = crate::compile(
+        r#"
+        rule test_1 {
+          strings:
+            $a = /foo.*bar/
+          condition:
+            $a and filesize > 6.1
+        }
+        rule test_2 {
+          strings:
+            $a = /foo.*bar/
+          condition:
+            $a
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = crate::scanner::Scanner::new(&rules);
+
+    assert_eq!(
+        scanner
+            .scan(b"foobar")
+            .expect("scan should not fail")
+            .matching_rules()
+            .len(),
+        1 // test_2 matches, but test_1 do not.
+    );
+
     let rules = crate::compile(
         r#"
         rule test {
@@ -3418,6 +3476,90 @@ fn filesize_bounds() {
             $a = "foobar"
           condition:
             $a and filesize <= 10
+        }
+        "#,
+    )
+    .expect_err("should fail");
+
+    crate::compile(
+        r#"
+        rule test_1 {
+          condition:
+            filesize > 100.3
+        }
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn header_constraints() {
+    let rules = crate::compile(
+        r#"
+        rule test_1 {
+          strings:
+            $a = /foo.*bar/
+          condition:
+            uint16(0) == 0x5a4d and $a
+        }
+        rule test_2 {
+          strings:
+            $a = /foo.*bar/
+          condition:
+            $a
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = crate::scanner::Scanner::new(&rules);
+
+    assert_eq!(
+        scanner
+            .scan(b"foobar")
+            .expect("scan should not fail")
+            .matching_rules()
+            .len(),
+        1 // test_2 matches, but test_1 do not.
+    );
+
+    let rules = crate::compile(
+        r#"
+        rule test {
+          strings:
+            $a = /foo.*bar/
+          condition:
+            $a and filesize == 6
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = crate::scanner::Scanner::new(&rules);
+
+    assert_eq!(
+        scanner
+            .scan(b"foobar")
+            .expect("scan should not fail")
+            .matching_rules()
+            .len(),
+        1
+    );
+
+    crate::compile(
+        r#"
+        rule test_1 {
+          strings:
+            $a = "foo"
+            $b = /a*/
+          condition:
+            uint16(0) == 0x5a4d and $a and $b
+        }
+        rule test_2 {
+          strings:
+            $c = "bar"
+          condition:
+            uint16(0) == 0x5a4d and $c
         }
         "#,
     )
@@ -3695,6 +3837,50 @@ fn of() {
         "#,
         b"foo"
     );
+
+    // Pattern `$a` used in `any of ($a) at 0` and also unanchored (`or $a`).
+    // `$a` must be made non-anchorable (anchor removed) and match at
+    // offset > 0.
+    rule_true!(
+        r#"
+        rule test {
+          strings:
+            $a = "bar"
+          condition:
+            any of ($a) at 0 or $a
+        }
+        "#,
+        b"foobar"
+    );
+
+    // Pattern `$a` used in `1 of ($a) at 0` and also in `#a > 0`.
+    // The match count usage `#a` must remove the anchor from `$a`.
+    rule_true!(
+        r#"
+        rule test {
+          strings:
+            $a = "bar"
+          condition:
+            1 of ($a) at 0 or #a > 0
+        }
+        "#,
+        b"foobar"
+    );
+
+    // Pattern `$a` anchored at offset 0 via `any of ($a) at 0`, and anchored
+    // at offset 3 via `$a at 3`. Anchoring to different offsets makes `$a`
+    // non-anchorable, allowing it to match at offset 3.
+    rule_true!(
+        r#"
+        rule test {
+          strings:
+            $a = "bar"
+          condition:
+            any of ($a) at 0 or $a at 3
+        }
+        "#,
+        b"foobar"
+    );
 }
 
 #[test]
@@ -3956,7 +4142,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "ELF"
+                $a = /EL(F|G)/
             condition:
                 uint32(0) == 0x464c457f and $a
         }
@@ -3968,7 +4154,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "ELF"
+                $a = /EL(F|G)/
             condition:
                 uint32(0) == 0x464c457f and $a
         }
@@ -3981,7 +4167,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "PE"
+                $a = /P(E|F)/
             condition:
                 uint16(0) == 0x5a4d and $a
         }
@@ -3993,7 +4179,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "PE"
+                $a = /P(E|F)/
             condition:
                 uint16(0) == 0x5a4d and $a
         }
@@ -4006,7 +4192,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "MZ"
+                $a = /M(Z|A)/
             condition:
                 $a at 0
         }
@@ -4018,7 +4204,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "MZ"
+                $a = /M(Z|A)/
             condition:
                 $a at 0
         }
@@ -4031,7 +4217,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "ELF"
+                $a = /EL(F|G)/
             condition:
                 uint32(0) == 0x464c457f and uint16(4) == 0x0102 and $a
         }
@@ -4043,7 +4229,7 @@ fn header_constraints_optimization() {
         r#"
         rule test {
             strings:
-                $a = "ELF"
+                $a = /EL(F|G)/
             condition:
                 uint32(0) == 0x464c457f and uint16(4) == 0x0102 and $a
         }
@@ -4057,13 +4243,13 @@ fn header_constraints_optimization() {
         r#"
         rule constrained {
             strings:
-                $a = "foo"
+                $a = /foo|bar/
             condition:
                 uint32(0) == 0x464c457f and $a
         }
         rule unconstrained {
             strings:
-                $a = "foo"
+                $a = /foo|bar/
             condition:
                 $a
         }
@@ -4076,13 +4262,13 @@ fn header_constraints_optimization() {
         r#"
         rule constrained {
             strings:
-                $a = "foo"
+                $a = /foo|bar/
             condition:
                 uint32(0) == 0x464c457f and $a
         }
         rule unconstrained {
             strings:
-                $a = "foo"
+                $a = /foo|bar/
             condition:
                 $a
         }
@@ -4096,11 +4282,160 @@ fn header_constraints_optimization() {
         r#"
         rule constrained {
             strings:
-                $a = "MZ"
+                $a = /M(Z|A)/
             condition:
                 uint8(0) == 0x00 and uint8(2) == 0x5a and $a
         }
         "#,
         b"\0MZ"
     );
+
+    // Patterns whose on-disk bytes differ from their literal text (because of
+    // the `nocase` or `wide`) must not derive a header constraint from the
+    // literal text. Otherwise, `$a at 0` would wrongly require the file to
+    // start with the plaintext bytes and the pattern would be pruned even
+    // though it matches at offset 0.
+
+    // `nocase`: data has a different case than the literal.
+    rule_true!(
+        r#"
+        rule test {
+            strings:
+                $a = /HELLO|WORLD/ nocase
+            condition:
+                $a at 0
+        }
+        "#,
+        b"hello"
+    );
+
+    // A regexp that reduces to a literal, with the `wide` modifier. For regexps
+    // the `wide` transformation is applied when lowering to sub-patterns, so it
+    // is not visible in the HIR and `as_literal_bytes()` returns the non-wide
+    // bytes. The header constraint must still not be derived from them.
+    rule_true!(
+        r#"
+        rule test {
+            strings:
+                $a = /Hello|World/ wide
+            condition:
+                $a at 0
+        }
+        "#,
+        b"H\0e\0l\0l\0o\0"
+    );
+
+    // Pattern sets anchored at an offset (e.g. `any of ($a) at 0`) anchor their
+    // constituent patterns to offset 0, but if a pattern is also used unanchored,
+    // its anchor must be removed.
+    rule_true!(
+        r#"
+        rule test {
+            strings:
+                $a = /Hello|World/
+            condition:
+                any of ($a) at 0 and $a
+        }
+        "#,
+        b"Hello"
+    );
+}
+
+#[test]
+fn test_pattern_atoms() {
+    let rules = crate::compile(
+        r#"
+        rule rule1 {
+            strings:
+                $a = "ABCD"
+                $b = { 01 02 03 04 }
+                $c = /foobar/
+            condition:
+                any of them
+        }
+        rule rule2 {
+            strings:
+                $x = "WIDE" wide
+                $y = "NOCASE" nocase
+            condition:
+                any of them
+        }
+        rule rule3 {
+            condition:
+                true
+        }
+        rule rule4 {
+            strings:
+                $anchored = "ANCHORED"
+            condition:
+                $anchored at 0
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut rules_iter = rules.iter();
+
+    // rule1
+    let rule1 = rules_iter.next().unwrap();
+    assert_eq!(rule1.identifier(), "rule1");
+    let mut patterns = rule1.patterns();
+    assert_eq!(patterns.len(), 3);
+
+    let pa = patterns.next().unwrap();
+    assert_eq!(pa.identifier(), "$a");
+    let pa_atoms: Vec<_> = pa.atoms().collect();
+    assert_eq!(pa_atoms.len(), 1);
+    assert_eq!(pa_atoms[0].as_slice(), b"ABCD");
+    assert_eq!(pa_atoms[0].as_ref(), b"ABCD");
+    assert_eq!(&*pa_atoms[0], b"ABCD");
+
+    let pb = patterns.next().unwrap();
+    assert_eq!(pb.identifier(), "$b");
+    let pb_atoms: Vec<_> = pb.atoms().collect();
+    assert_eq!(pb_atoms.len(), 1);
+    assert_eq!(pb_atoms[0].as_slice(), &[0x01, 0x02, 0x03, 0x04]);
+
+    let pc = patterns.next().unwrap();
+    assert_eq!(pc.identifier(), "$c");
+    let pc_atoms: Vec<_> = pc.atoms().collect();
+    assert_eq!(pc_atoms.len(), 1);
+    assert_eq!(pc_atoms[0].as_slice(), b"obar");
+
+    // rule2
+    let rule2 = rules_iter.next().unwrap();
+    assert_eq!(rule2.identifier(), "rule2");
+    let mut patterns = rule2.patterns();
+
+    let px = patterns.next().unwrap();
+    assert_eq!(px.identifier(), "$x");
+    let px_atoms: Vec<_> = px.atoms().collect();
+    assert_eq!(px_atoms.len(), 1);
+    assert_eq!(px_atoms[0].as_slice(), b"W\0I\0");
+
+    let py = patterns.next().unwrap();
+    assert_eq!(py.identifier(), "$y");
+    let py_atoms = py.atoms();
+    assert!(py_atoms.len() > 1);
+    // ExactSizeIterator check
+    assert_eq!(py_atoms.len(), py.atoms().collect::<Vec<_>>().len());
+    // DoubleEndedIterator check
+    let rev_atoms: Vec<_> = py.atoms().rev().collect();
+    let mut fwd_atoms: Vec<_> = py.atoms().collect();
+    fwd_atoms.reverse();
+    assert_eq!(rev_atoms, fwd_atoms);
+
+    // rule3 (no patterns)
+    let rule3 = rules_iter.next().unwrap();
+    assert_eq!(rule3.identifier(), "rule3");
+    assert_eq!(rule3.patterns().len(), 0);
+
+    // rule4 (anchored pattern has no atoms in Aho-Corasick)
+    let rule4 = rules_iter.next().unwrap();
+    assert_eq!(rule4.identifier(), "rule4");
+    let mut patterns = rule4.patterns();
+    let panchor = patterns.next().unwrap();
+    assert_eq!(panchor.identifier(), "$anchored");
+    assert_eq!(panchor.atoms().len(), 0);
+    assert!(panchor.atoms().next().is_none());
 }

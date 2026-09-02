@@ -259,7 +259,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
         }
 
         let file = File::open(rules_path)
-            .with_context(|| format!("can not open {:?}", &rules_path))?;
+            .with_context(|| format!("can not open {:?}", rules_path))?;
 
         let rules = Rules::deserialize_from(file)?;
 
@@ -275,7 +275,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
 
         rules
     } else {
-        compile_rules(rules_path, args, config)?
+        compile_rules(rules_path, args, config)?.0
     };
 
     let rules_ref = &rules;
@@ -370,7 +370,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
                 let path = file_path.display().to_string();
                 scanner.console_log(move |msg| {
                     output
-                        .send(Message::Error(format!("{}: {}", &path.paint(Yellow), msg.paint(Yellow))))
+                        .send(Message::Error(format!("{}: {}", path.paint(Yellow), msg.paint(Yellow))))
                         .unwrap();
                 });
             }
@@ -404,7 +404,7 @@ pub fn exec_scan(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
 
             let scan_results = scanner
                 .scan_file_with_options(file_path.as_path(), scan_options)
-                .with_context(|| format!("scanning {:?}", &file_path));
+                .with_context(|| format!("scanning {:?}", file_path));
 
             state
                 .files_in_progress
@@ -817,7 +817,7 @@ mod output_handler {
                 output
                     .send(Message::Info(format!(
                         "{}: {}",
-                        &file_path.display().to_string(),
+                        file_path.display(),
                         scan_results.len()
                     )))
                     .unwrap();
@@ -856,7 +856,7 @@ mod output_handler {
                     msg.push_str(" [");
                     for (pos, tag) in tags.with_position() {
                         msg.push_str(tag.identifier());
-                        if !matches!(pos, itertools::Position::Last) {
+                        if !pos.is_last {
                             msg.push(',');
                         }
                     }
@@ -887,7 +887,7 @@ mod output_handler {
                                 v.escape_ascii()
                             )),
                         };
-                        if !matches!(pos, itertools::Position::Last) {
+                        if !pos.is_last {
                             msg.push(',');
                         }
                     }
@@ -952,10 +952,7 @@ mod output_handler {
                                         match_str.push_str(
                                             format!("{b:02x}").as_str(),
                                         );
-                                        if !matches!(
-                                            pos,
-                                            itertools::Position::Last
-                                        ) {
+                                        if !pos.is_last {
                                             match_str.push(' ');
                                         }
                                     }
