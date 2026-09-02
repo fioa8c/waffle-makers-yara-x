@@ -302,17 +302,17 @@ mod tests {
         );
         // 2701 atoms of exactly 2 bytes -> too many short atoms.
         assert_eq!(
-            SlowReason::from_atom_sizes(std::iter::repeat(2).take(2701)),
+            SlowReason::from_atom_sizes(std::iter::repeat_n(2, 2701)),
             Some(SlowReason::TooManyShortAtoms { count: 2701 })
         );
         // 2700 atoms of 2 bytes is still acceptable.
         assert_eq!(
-            SlowReason::from_atom_sizes(std::iter::repeat(2).take(2700)),
+            SlowReason::from_atom_sizes(std::iter::repeat_n(2, 2700)),
             None
         );
         // Mixed lengths with min >= 2 are fine regardless of count.
         assert_eq!(
-            SlowReason::from_atom_sizes(std::iter::repeat(3).take(5000)),
+            SlowReason::from_atom_sizes(std::iter::repeat_n(3, 5000)),
             None
         );
     }
