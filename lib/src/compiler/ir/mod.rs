@@ -40,7 +40,7 @@ use std::ops::{Add, Index};
 use std::rc::Rc;
 
 use bitflags::bitflags;
-use bstr::BString;
+use bstr::{BString, ByteSlice};
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 
@@ -71,19 +71,21 @@ mod tests;
 bitflags! {
     /// Flags associated to rule patterns.
     ///
-    /// Each of these flags correspond to one of the allowed YARA pattern
-    /// modifiers, and generally they are set if the corresponding modifier
-    /// appears alongside the pattern in the source code. The only exception is
-    /// the `Ascii` flag, which will be set when `Wide` is not set regardless
-    /// of what the source code says. This follows the semantics of YARA
-    /// pattern modifiers, in which a pattern is considered `ascii` by default
-    /// when neither `ascii` nor `wide` modifiers are used.
+    /// These flags roughly correspond to the allowed YARA pattern modifiers,
+    /// and they are set according to the combination of modifiers that appears
+    /// alongside the pattern in the source code. For text and regexp patterns,
+    /// the `WideOnly` flag will be set when `wide` is used without `ascii`, and
+    /// `WideAndAscii` will be set when both `wide` and `ascii` are used. When
+    /// neither modifier is used (default ASCII mode) or for hex patterns,
+    /// neither of these two flags is set.
     ///
-    /// In resume either the `Ascii` or the `Wide` flags (or both) will be set.
+    /// There are also additional flags that are not related to pattern
+    /// modifiers (like: `NonAnchorable`), but convey information about the
+    /// pattern itself.
     #[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq)]
     pub struct PatternFlags: u16 {
-        const Ascii                = 0x0001;
-        const Wide                 = 0x0002;
+        const WideOnly             = 0x0001;
+        const WideAndAscii         = 0x0002;
         const Nocase               = 0x0004;
         const Base64               = 0x0008;
         const Base64Wide           = 0x0010;
@@ -224,6 +226,11 @@ pub(crate) enum Pattern {
 
 impl Pattern {
     #[inline]
+    pub fn is_regex(&self) -> bool {
+        matches!(self, Pattern::Regexp(_) | Pattern::Hex(_))
+    }
+
+    #[inline]
     pub fn flags(&self) -> &PatternFlags {
         match self {
             Pattern::Text(literal) => &literal.flags,
@@ -312,6 +319,15 @@ impl Pattern {
         }
     }
 
+    #[inline]
+    pub fn filesize_bounds(&self) -> &FilesizeBounds {
+        match self {
+            Pattern::Text(literal) => &literal.filesize_bounds,
+            Pattern::Regexp(regexp) => &regexp.filesize_bounds,
+            Pattern::Hex(regexp) => &regexp.filesize_bounds,
+        }
+    }
+
     pub fn set_header_constraints(&mut self, constraints: &HeaderConstraint) {
         match self {
             Pattern::Text(literal) => {
@@ -320,6 +336,15 @@ impl Pattern {
             Pattern::Regexp(regexp) | Pattern::Hex(regexp) => {
                 regexp.header_constraints = constraints.clone();
             }
+        }
+    }
+
+    #[inline]
+    pub fn header_constraints(&self) -> &HeaderConstraint {
+        match self {
+            Pattern::Text(literal) => &literal.header_constraints,
+            Pattern::Regexp(regexp) => &regexp.header_constraints,
+            Pattern::Hex(regexp) => &regexp.header_constraints,
         }
     }
 }
@@ -923,6 +948,54 @@ impl IR {
         self.root.unwrap()
     }
 
+    fn lower_bound_from_const(
+        c: &TypeValue,
+        inclusive: bool,
+    ) -> Option<Bound<i64>> {
+        match c {
+            TypeValue::Integer { value: Const(v), .. } => {
+                if inclusive {
+                    Some(Bound::Included(*v))
+                } else {
+                    Some(Bound::Excluded(*v))
+                }
+            }
+            TypeValue::Float { value: Const(v), .. } if v.is_finite() => {
+                let floor = v.floor();
+                if inclusive && floor == *v {
+                    Some(Bound::Included(floor as i64))
+                } else {
+                    Some(Bound::Excluded(floor as i64))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn upper_bound_from_const(
+        c: &TypeValue,
+        inclusive: bool,
+    ) -> Option<Bound<i64>> {
+        match c {
+            TypeValue::Integer { value: Const(v), .. } => {
+                if inclusive {
+                    Some(Bound::Included(*v))
+                } else {
+                    Some(Bound::Excluded(*v))
+                }
+            }
+            TypeValue::Float { value: Const(v), .. } if v.is_finite() => {
+                let ceil = v.ceil();
+                if inclusive && ceil == *v {
+                    Some(Bound::Included(ceil as i64))
+                } else {
+                    Some(Bound::Excluded(ceil as i64))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Determines the constraints on `filesize` imposed by a rule condition.
     ///
     /// This function analyzes the rule’s condition to determine whether it
@@ -949,11 +1022,19 @@ impl IR {
                     match (self.get(*lhs), self.get(*rhs)) {
                         // constant > filesize
                         (Expr::Const(c), Expr::Filesize) => {
-                            result.min_end(Bound::Excluded(c.as_integer()));
+                            if let Some(bound) =
+                                Self::upper_bound_from_const(c, false)
+                            {
+                                result.min_end(bound);
+                            }
                         }
                         // filesize > constant
                         (Expr::Filesize, Expr::Const(c)) => {
-                            result.max_start(Bound::Excluded(c.as_integer()));
+                            if let Some(bound) =
+                                Self::lower_bound_from_const(c, false)
+                            {
+                                result.max_start(bound);
+                            }
                         }
                         _ => {}
                     }
@@ -962,11 +1043,19 @@ impl IR {
                     match (self.get(*lhs), self.get(*rhs)) {
                         // constant >= filesize
                         (Expr::Const(c), Expr::Filesize) => {
-                            result.min_end(Bound::Included(c.as_integer()));
+                            if let Some(bound) =
+                                Self::upper_bound_from_const(c, true)
+                            {
+                                result.min_end(bound);
+                            }
                         }
                         // filesize >= constant
                         (Expr::Filesize, Expr::Const(c)) => {
-                            result.max_start(Bound::Included(c.as_integer()));
+                            if let Some(bound) =
+                                Self::lower_bound_from_const(c, true)
+                            {
+                                result.max_start(bound);
+                            }
                         }
                         _ => {}
                     }
@@ -975,24 +1064,40 @@ impl IR {
                     match (self.get(*lhs), self.get(*rhs)) {
                         // constant < filesize
                         (Expr::Const(c), Expr::Filesize) => {
-                            result.max_start(Bound::Excluded(c.as_integer()));
+                            if let Some(bound) =
+                                Self::lower_bound_from_const(c, false)
+                            {
+                                result.max_start(bound);
+                            }
                         }
                         // filesize < constant
                         (Expr::Filesize, Expr::Const(c)) => {
-                            result.min_end(Bound::Excluded(c.as_integer()));
+                            if let Some(bound) =
+                                Self::upper_bound_from_const(c, false)
+                            {
+                                result.min_end(bound);
+                            }
                         }
                         _ => {}
                     }
                 }
                 Expr::Le { lhs, rhs } => {
                     match (self.get(*lhs), self.get(*rhs)) {
-                        // constant < filesize
+                        // constant <= filesize
                         (Expr::Const(c), Expr::Filesize) => {
-                            result.max_start(Bound::Included(c.as_integer()));
+                            if let Some(bound) =
+                                Self::lower_bound_from_const(c, true)
+                            {
+                                result.max_start(bound);
+                            }
                         }
-                        // filesize < constant
+                        // filesize <= constant
                         (Expr::Filesize, Expr::Const(c)) => {
-                            result.min_end(Bound::Included(c.as_integer()));
+                            if let Some(bound) =
+                                Self::upper_bound_from_const(c, true)
+                            {
+                                result.min_end(bound);
+                            }
                         }
                         _ => {}
                     }
@@ -1007,9 +1112,22 @@ impl IR {
         result
     }
 
-    pub fn header_constraints(
+    /// Determines the constraints on the file header imposed by a rule condition.
+    ///
+    /// This function analyzes the rule's condition to determine whether it
+    /// restricts matching to files that start with a specific sequence of bytes.
+    ///
+    /// For example, the condition `uint32(0) == 0x464c457f and $a` requires that
+    /// the first 4 bytes of the file are `0x7f, 0x45, 0x4c, 0x46` (little-endian).
+    /// Similarly, `$a at 0` imposes a header constraint if `$a` has a known
+    /// constant prefix.
+    ///
+    /// In contrast, the condition `uint32(0) == 0x464c457f or $a` does not impose
+    /// a header constraint, since the use of `or` allows files with a different
+    /// header to also match.
+    pub fn header_constraints<'a>(
         &self,
-        pattern_prefix_lookup: impl Fn(PatternIdx) -> Option<Vec<u8>>,
+        pattern_lookup: impl Fn(PatternIdx) -> &'a Pattern,
     ) -> HeaderConstraint {
         let mut constrained_bytes = BTreeMap::new();
         let mut unsatisfiable = false;
@@ -1029,14 +1147,51 @@ impl IR {
                         &mut unsatisfiable,
                     );
                 }
-                Expr::PatternMatch { pattern, anchor } => {
+                Expr::PatternMatch { pattern: pattern_idx, anchor } => {
+                    let pattern = pattern_lookup(*pattern_idx);
+                    // A pattern that has any of these flags it's not eligible
+                    // as a constraint. Modifiers like `xor`, `nocase`, `wide`,
+                    // `base64` and `base64wide` make the bytes that actually
+                    // appear in the data differ from the literal text (they
+                    // are XORed, case-folded, interleaved with zeroes or
+                    // base64-encoded), so no header constraint can be derived
+                    // from them.
+                    let excluded_flags = PatternFlags::Xor
+                        | PatternFlags::Nocase
+                        | PatternFlags::WideOnly
+                        | PatternFlags::WideAndAscii
+                        | PatternFlags::Base64
+                        | PatternFlags::Base64Wide;
+
+                    if pattern.flags().intersects(excluded_flags) {
+                        continue;
+                    }
+
+                    // Make sure that if we add a new flag in the future, we
+                    // take it into account here. The new flag either makes
+                    // the pattern ineligible as a header constraint (and must
+                    // be added to `excluded_flags`, or it must be added to
+                    // the list below.
+                    debug_assert_eq!(
+                        excluded_flags.complement(),
+                        PatternFlags::Fullword
+                            | PatternFlags::Private
+                            | PatternFlags::NonAnchorable
+                    );
+
                     if let MatchAnchor::At(offset_expr) = anchor
                         && let Some(0) =
                             self.get(*offset_expr).try_as_const_integer()
-                        && let Some(prefix_bytes) =
-                            pattern_prefix_lookup(*pattern)
+                        && let Some(pattern_bytes) = match pattern {
+                            Pattern::Text(literal) => {
+                                Some(literal.text.as_bytes())
+                            }
+                            Pattern::Regexp(re) | Pattern::Hex(re) => {
+                                re.hir.as_literal_bytes()
+                            }
+                        }
                     {
-                        for (i, &b) in prefix_bytes.iter().enumerate() {
+                        for (i, &b) in pattern_bytes.iter().enumerate() {
                             match constrained_bytes.entry(i) {
                                 Entry::Occupied(entry) => {
                                     if *entry.get() != b {

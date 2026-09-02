@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::iter;
-use std::ops::RangeInclusive;
+use std::ops::{ControlFlow, RangeInclusive};
 use std::rc::Rc;
 
 use bstr::{BString, ByteSlice};
@@ -22,7 +22,7 @@ use crate::compiler::errors::{
     InvalidBase64Alphabet, InvalidModifier, InvalidModifierCombination,
     InvalidPattern, InvalidRange, InvalidRegexp, MismatchingTypes,
     MixedGreediness, NumberOutOfRange, SyntaxError, TooManyPatterns,
-    UnexpectedNegativeNumber, WrongArguments, WrongType,
+    TooManyVariables, UnexpectedNegativeNumber, WrongArguments, WrongType,
 };
 use crate::compiler::ir::hex2hir::hex_pattern_hir_from_ast;
 use crate::compiler::ir::{
@@ -72,6 +72,22 @@ pub(in crate::compiler) fn patterns_from_ast<'src>(
                 ctx.report_builder
                     .span_to_code_loc(existing.identifier.span()),
             ));
+        }
+        if let Some(existing) = ctx
+            .current_rule_patterns
+            .iter()
+            .find(|p| p.pattern() == pattern.pattern())
+        {
+            ctx.warnings.add(|| {
+                warnings::DuplicatePatternValue::build(
+                    ctx.report_builder,
+                    existing.identifier().name.to_string(),
+                    ctx.report_builder
+                        .span_to_code_loc(pattern.span().clone()),
+                    ctx.report_builder
+                        .span_to_code_loc(existing.span().clone()),
+                )
+            });
         }
         if ctx.current_rule_patterns.len() == MAX_PATTERNS_PER_RULE {
             return Err(TooManyPatterns::build(
@@ -144,12 +160,12 @@ pub(in crate::compiler) fn text_pattern_from_ast<'src>(
 
     let mut flags = PatternFlags::empty();
 
-    if ascii.is_some() || wide.is_none() {
-        flags.insert(PatternFlags::Ascii);
-    }
-
     if wide.is_some() {
-        flags.insert(PatternFlags::Wide);
+        if ascii.is_some() {
+            flags.insert(PatternFlags::WideAndAscii);
+        } else {
+            flags.insert(PatternFlags::WideOnly);
+        }
     }
 
     if nocase.is_some() {
@@ -267,10 +283,13 @@ pub(in crate::compiler) fn hex_pattern_from_ast<'src>(
     ctx: &mut CompileContext,
     pattern: &ast::HexPattern<'src>,
 ) -> Result<PatternInRule<'src>, CompileError> {
-    // The only modifier accepted by hex patterns is `private`.
+    let mut pattern_flags = PatternFlags::empty();
     for modifier in pattern.modifiers.iter() {
         match modifier {
-            ast::PatternModifier::Private { .. } => {}
+            // The only modifier accepted by hex patterns is `private`.
+            ast::PatternModifier::Private { .. } => {
+                pattern_flags |= PatternFlags::Private;
+            }
             _ => {
                 return Err(InvalidModifier::build(
                     ctx.report_builder,
@@ -310,7 +329,7 @@ pub(in crate::compiler) fn hex_pattern_from_ast<'src>(
         fast_scan_allowed: true,
         pattern: Pattern::Hex(RegexpPattern {
             hir,
-            flags: PatternFlags::Ascii,
+            flags: pattern_flags,
             anchored_at: None,
             filesize_bounds: FilesizeBounds::default(),
             header_constraints: HeaderConstraint::default(),
@@ -358,18 +377,20 @@ pub(in crate::compiler) fn regexp_pattern_from_ast<'src>(
 
     let mut flags = PatternFlags::empty();
 
-    if pattern.modifiers.ascii().is_some()
-        || pattern.modifiers.wide().is_none()
-    {
-        flags |= PatternFlags::Ascii;
-    }
-
     if pattern.modifiers.wide().is_some() {
-        flags |= PatternFlags::Wide;
+        if pattern.modifiers.ascii().is_some() {
+            flags |= PatternFlags::WideAndAscii;
+        } else {
+            flags |= PatternFlags::WideOnly;
+        }
     }
 
     if pattern.modifiers.fullword().is_some() {
         flags |= PatternFlags::Fullword;
+    }
+
+    if pattern.modifiers.private().is_some() {
+        flags |= PatternFlags::Private;
     }
 
     // A regexp pattern can use either the `nocase` modifier or the `/i`
@@ -456,9 +477,9 @@ pub(in crate::compiler) fn regexp_pattern_from_ast<'src>(
 }
 
 /// Given the AST for some expression, creates its IR.
-fn expr_from_ast(
-    ctx: &mut CompileContext,
-    expr: &ast::Expr,
+fn expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    expr: &ast::Expr<'src>,
 ) -> Result<ExprId, CompileError> {
     let expr = match expr {
         ast::Expr::Entrypoint { span } => {
@@ -498,12 +519,21 @@ fn expr_from_ast(
         }
 
         ast::Expr::Regexp(regexp) => {
-            re::parser::Parser::new()
+            let hir = re::parser::Parser::new()
                 .relaxed_re_syntax(ctx.relaxed_re_syntax)
                 .parse(regexp.as_ref())
                 .map_err(|err| {
                     re_error_to_compile_error(ctx.report_builder, regexp, err)
                 })?;
+
+            hir.build_automata().map_err(|err| {
+                InvalidRegexp::build(
+                    ctx.report_builder,
+                    err.to_string(),
+                    ctx.report_builder.span_to_code_loc(regexp.span()),
+                    None,
+                )
+            })?;
 
             ctx.ir
                 .constant(TypeValue::Regexp(Some(Regexp::new(regexp.literal))))
@@ -757,12 +787,7 @@ fn expr_from_ast(
                 _ => {
                     let at = match anchor {
                         MatchAnchor::At(expr) => {
-                            let value = ctx.ir.get(expr).type_value();
-                            if value.is_const() {
-                                value.try_as_integer()
-                            } else {
-                                None
-                            }
+                            ctx.ir.get(expr).try_as_const_integer()
                         }
                         _ => None,
                     };
@@ -973,9 +998,9 @@ fn expr_from_ast(
     Ok(expr)
 }
 
-pub(in crate::compiler) fn rule_condition_from_ast(
-    ctx: &mut CompileContext,
-    rule: &ast::Rule,
+pub(in crate::compiler) fn rule_condition_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    rule: &'src ast::Rule<'src>,
 ) -> Result<ExprId, CompileError> {
     // Start with clean IR tree.
     ctx.ir.clear();
@@ -1003,12 +1028,14 @@ pub(in crate::compiler) fn rule_condition_from_ast(
 
     ctx.ir.root = Some(condition);
 
+    check_unintended_patterns_in_sets(ctx, &rule.condition);
+
     Ok(condition)
 }
 
-fn bool_expr_from_ast(
-    ctx: &mut CompileContext,
-    ast: &ast::Expr,
+fn bool_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    ast: &ast::Expr<'src>,
 ) -> Result<ExprId, CompileError> {
     let expr = expr_from_ast(ctx, ast)?;
 
@@ -1092,12 +1119,18 @@ impl OfItems {
     }
 }
 
-fn of_expr_from_ast(
-    ctx: &mut CompileContext,
-    of: &ast::Of,
+fn of_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    of: &ast::Of<'src>,
 ) -> Result<ExprId, CompileError> {
     let quantifier = quantifier_from_ast(ctx, &of.quantifier)?;
-    let mut stack_frame = ctx.vars.new_frame(VarStack::OF_FRAME_SIZE);
+    let mut stack_frame =
+        ctx.vars.new_frame(VarStack::OF_FRAME_SIZE).ok_or_else(|| {
+            TooManyVariables::build(
+                ctx.report_builder,
+                ctx.report_builder.span_to_code_loc(of.span()),
+            )
+        })?;
 
     let (items, next_item_var) = match &of.items {
         // `x of (<boolean expr>, <boolean expr>, ...)`
@@ -1228,6 +1261,25 @@ fn of_expr_from_ast(
 
     let anchor = anchor_from_ast(ctx, &of.anchor)?;
 
+    // When have `<quantifier> of <pattern set> at <anchor>`, all the patterns
+    // in the set must be anchored. If we have `<quantifier> of <pattern set>`
+    // all are marked as non-anchorable.
+    if let OfItems::PatternSet(ref pattern_set) = items {
+        let anchor_at = match anchor {
+            MatchAnchor::At(expr) => ctx.ir.get(expr).try_as_const_integer(),
+            _ => None,
+        };
+        for &pattern_idx in pattern_set {
+            let pattern =
+                &mut ctx.current_rule_patterns[pattern_idx.as_usize()];
+            if let Some(offset) = anchor_at {
+                pattern.anchor_at(offset as usize);
+            } else {
+                pattern.make_non_anchorable();
+            }
+        }
+    }
+
     ctx.vars.unwind(&stack_frame);
 
     let expr = match items {
@@ -1244,13 +1296,26 @@ fn of_expr_from_ast(
     Ok(expr)
 }
 
-fn for_of_expr_from_ast(
-    ctx: &mut CompileContext,
-    for_of: &ast::ForOf,
+fn for_of_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    for_of: &ast::ForOf<'src>,
 ) -> Result<ExprId, CompileError> {
     let quantifier = quantifier_from_ast(ctx, &for_of.quantifier)?;
     let pattern_set = pattern_set_from_ast(ctx, &for_of.pattern_set)?;
-    let mut stack_frame = ctx.vars.new_frame(VarStack::FOR_OF_FRAME_SIZE);
+
+    // Patterns used in a `for .. of` expressions are marked as non-anchorable.
+    for &pattern_idx in &pattern_set {
+        ctx.current_rule_patterns[pattern_idx.as_usize()]
+            .make_non_anchorable();
+    }
+
+    let mut stack_frame =
+        ctx.vars.new_frame(VarStack::FOR_OF_FRAME_SIZE).ok_or_else(|| {
+            TooManyVariables::build(
+                ctx.report_builder,
+                ctx.report_builder.span_to_code_loc(for_of.span()),
+            )
+        })?;
 
     let for_vars = ForVars {
         n: stack_frame.new_var(Type::Integer),
@@ -1361,9 +1426,9 @@ fn is_potentially_large_range(ctx: &CompileContext, range: &Range) -> bool {
         .is_some()
 }
 
-fn for_in_expr_from_ast(
-    ctx: &mut CompileContext,
-    for_in: &ast::ForIn,
+fn for_in_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    for_in: &ast::ForIn<'src>,
 ) -> Result<ExprId, CompileError> {
     let quantifier = quantifier_from_ast(ctx, &for_in.quantifier)?;
     let iterable = iterable_from_ast(ctx, &for_in.iterable)?;
@@ -1462,7 +1527,13 @@ fn for_in_expr_from_ast(
         ));
     }
 
-    let mut stack_frame = ctx.vars.new_frame(VarStack::FOR_IN_FRAME_SIZE);
+    let mut stack_frame =
+        ctx.vars.new_frame(VarStack::FOR_IN_FRAME_SIZE).ok_or_else(|| {
+            TooManyVariables::build(
+                ctx.report_builder,
+                ctx.report_builder.span_to_code_loc(for_in.span()),
+            )
+        })?;
 
     let for_vars = ForVars {
         n: stack_frame.new_var(Type::Integer),
@@ -1499,12 +1570,21 @@ fn for_in_expr_from_ast(
     Ok(ctx.ir.for_in(quantifier, variables, for_vars, iterable, body))
 }
 
-fn with_expr_from_ast(
-    ctx: &mut CompileContext,
-    with: &ast::With,
+fn with_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    with: &ast::With<'src>,
 ) -> Result<ExprId, CompileError> {
     // Create stack frame with capacity for the with statement variables
-    let mut stack_frame = ctx.vars.new_frame(with.declarations.len() as i32);
+    let mut stack_frame = ctx
+        .vars
+        .new_frame(with.declarations.len() as i32)
+        .ok_or_else(|| {
+        TooManyVariables::build(
+            ctx.report_builder,
+            ctx.report_builder.span_to_code_loc(with.declarations.span()),
+        )
+    })?;
+
     let mut declarations = Vec::new();
 
     // Create a new symbol table that will hold the variables declared by the
@@ -1562,9 +1642,9 @@ fn with_expr_from_ast(
     Ok(ctx.ir.with(declarations, body))
 }
 
-fn iterable_from_ast(
-    ctx: &mut CompileContext,
-    iter: &ast::Iterable,
+fn iterable_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    iter: &ast::Iterable<'src>,
 ) -> Result<Iterable, CompileError> {
     match iter {
         ast::Iterable::Range(range) => {
@@ -1615,9 +1695,9 @@ fn iterable_from_ast(
     }
 }
 
-fn anchor_from_ast(
-    ctx: &mut CompileContext,
-    anchor: &Option<ast::MatchAnchor>,
+fn anchor_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    anchor: &Option<ast::MatchAnchor<'src>>,
 ) -> Result<MatchAnchor, CompileError> {
     match anchor {
         Some(ast::MatchAnchor::At(at_)) => {
@@ -1630,9 +1710,9 @@ fn anchor_from_ast(
     }
 }
 
-fn range_from_ast(
-    ctx: &mut CompileContext,
-    range: &ast::Range,
+fn range_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    range: &ast::Range<'src>,
 ) -> Result<Range, CompileError> {
     let lower_bound = non_negative_integer_from_ast(ctx, &range.lower_bound)?;
     let upper_bound = non_negative_integer_from_ast(ctx, &range.upper_bound)?;
@@ -1661,9 +1741,9 @@ fn range_from_ast(
     Ok(Range { lower_bound, upper_bound })
 }
 
-fn non_negative_integer_from_ast(
-    ctx: &mut CompileContext,
-    expr: &ast::Expr,
+fn non_negative_integer_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    expr: &ast::Expr<'src>,
 ) -> Result<ExprId, CompileError> {
     let span = expr.span();
     let expr = expr_from_ast(ctx, expr)?;
@@ -1683,9 +1763,9 @@ fn non_negative_integer_from_ast(
     Ok(expr)
 }
 
-fn integer_in_range_from_ast(
-    ctx: &mut CompileContext,
-    expr: &ast::Expr,
+fn integer_in_range_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    expr: &ast::Expr<'src>,
     range: RangeInclusive<i64>,
 ) -> Result<ExprId, CompileError> {
     let span = expr.span();
@@ -1711,9 +1791,9 @@ fn integer_in_range_from_ast(
     Ok(expr)
 }
 
-fn quantifier_from_ast(
-    ctx: &mut CompileContext,
-    quantifier: &ast::Quantifier,
+fn quantifier_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    quantifier: &ast::Quantifier<'src>,
 ) -> Result<Quantifier, CompileError> {
     match quantifier {
         ast::Quantifier::None { .. } => Ok(Quantifier::None),
@@ -1733,9 +1813,9 @@ fn quantifier_from_ast(
     }
 }
 
-fn pattern_set_from_ast(
-    ctx: &mut CompileContext,
-    pattern_set: &ast::PatternSet,
+fn pattern_set_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    pattern_set: &ast::PatternSet<'src>,
 ) -> Result<Vec<PatternIdx>, CompileError> {
     match pattern_set {
         // `x of them`
@@ -1748,10 +1828,9 @@ fn pattern_set_from_ast(
                 ));
             }
 
-            // Make all the patterns in the set non-anchorable and mark them
-            // as used.
+            // Mark all the patterns in the set as used.
             for pattern in ctx.current_rule_patterns.iter_mut() {
-                pattern.make_non_anchorable().mark_as_used();
+                pattern.mark_as_used();
             }
 
             let pattern_indexes: Vec<PatternIdx> =
@@ -1796,9 +1875,8 @@ fn pattern_set_from_ast(
                 // check if some of them matches the identifier.
                 if set.iter().any(|p| p.matches(pattern.identifier())) {
                     pattern_indexes.push(i.into());
-                    // All the patterns in the set are made non-anchorable, and
-                    // marked as used.
-                    pattern.make_non_anchorable().mark_as_used();
+                    // All the patterns in the set are marked as used.
+                    pattern.mark_as_used();
                 }
             }
 
@@ -1807,9 +1885,393 @@ fn pattern_set_from_ast(
     }
 }
 
-fn func_call_from_ast(
-    ctx: &mut CompileContext,
-    func_call: &ast::FuncCall,
+/// Represents a single conjunctive branch (a set of condition sub-expressions
+/// that must be true at the same time, i.e., joined by `AND` operators within
+/// an execution path).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ConjunctiveBranch<'src> {
+    exprs: Vec<&'src ast::Expr<'src>>,
+}
+
+impl<'src> ConjunctiveBranch<'src> {
+    /// Returns the AST sub-expressions in this conjunctive branch.
+    #[inline]
+    pub fn exprs(&self) -> &[&'src ast::Expr<'src>] {
+        &self.exprs
+    }
+
+    /// Merges another conjunctive branch into this branch.
+    #[allow(dead_code)]
+    pub fn merge(&mut self, other: &ConjunctiveBranch<'src>) {
+        self.exprs.extend_from_slice(&other.exprs);
+    }
+}
+
+/// Container for all conjunctive branches of an AST expression tree.
+#[derive(Clone, Debug)]
+pub(crate) struct ConjunctiveBranches<'src> {
+    branches: Vec<ConjunctiveBranch<'src>>,
+}
+
+/// Stack frame representing an execution step during iterative DNF AST
+/// expansion.
+enum Frame<'src> {
+    /// Evaluates a sequence of child AST sub-expressions sequentially,
+    /// passing accumulated conjunctive branches from one child to the next.
+    Sequence {
+        exprs: Box<dyn Iterator<Item = &'src ast::Expr<'src>> + 'src>,
+        branches: Vec<ConjunctiveBranch<'src>>,
+    },
+    /// Evaluates disjunctive (`OR`) alternative branches independently,
+    /// feeding each operand a snapshot of the input branches and combining
+    /// the resulting branches from all operands.
+    Disjunction {
+        operands: Box<dyn Iterator<Item = &'src ast::Expr<'src>> + 'src>,
+        branches: Vec<ConjunctiveBranch<'src>>,
+        results: Vec<ConjunctiveBranch<'src>>,
+    },
+}
+
+impl<'src> ConjunctiveBranches<'src> {
+    /// Maximum number of conjunctive branches to extract before capping
+    /// expansion (prevents exponential growth on complex boolean trees).
+    const MAX_BRANCHES: usize = 256;
+
+    /// Decomposes an AST expression tree into its conjunctive branches.
+    ///
+    /// The conjunctive branch decomposition algorithm converts a boolean AST
+    /// tree into Disjunctive Normal Form (DNF) execution paths (conjunctive
+    /// branches). Each `ConjunctiveBranch` represents a set of terms that must
+    /// be true at the same time in a single execution path of the rule
+    /// condition.
+    ///
+    /// Returns `None` if the number of branches exceeds `MAX_BRANCHES`.
+    pub fn from_expr(expr: &'src ast::Expr<'src>) -> Option<Self> {
+        Self::extract_branches(expr).map(|branches| Self { branches })
+    }
+
+    /// Returns the slice of conjunctive branches.
+    #[inline]
+    pub fn branches(&self) -> &[ConjunctiveBranch<'src>] {
+        &self.branches
+    }
+
+    /// Decomposes an AST expression tree into Disjunctive Normal Form (DNF)
+    /// conjunctive branches using an explicit, non-recursive stack frame loop.
+    ///
+    /// # How the Algorithm Works
+    ///
+    /// The algorithm transforms a boolean AST (e.g. `(A or B) and C`) into
+    /// alternative execution paths (e.g. `[A, C]` and `[B, C]`), where each
+    /// path (`ConjunctiveBranch`) contains terms that must evaluate to true
+    /// simultaneously.
+    ///
+    /// The traversal uses an explicit stack of `Frame`s instead of call-stack
+    /// recursion:
+    ///
+    /// - `Frame::Sequence` (Accumulating Conjunctions): Traverses sub-expressions
+    ///   sequentially. Each expression inherits the `branches` accumulated by its
+    ///   predecessor. Terminal leaf expressions append themselves to every active
+    ///   branch in `branches`.
+    ///
+    /// - `Frame::Disjunction` (Forking `OR` Alternatives): Evaluates `OR`
+    ///   operands independently. Each operand receives a cloned snapshot of the
+    ///   input `branches`. The alternative branches generated by each operand are
+    ///   combined into `results` and returned to the parent frame.
+    ///
+    /// When a frame completes, `pass_branches_to_parent` passes its branches to
+    /// the parent frame on the stack. Returns `None` if the total output branches
+    /// exceed `MAX_BRANCHES` (256) at any point.
+    fn extract_branches(
+        root: &'src ast::Expr<'src>,
+    ) -> Option<Vec<ConjunctiveBranch<'src>>> {
+        let mut stack = vec![Frame::Sequence {
+            exprs: Box::new(iter::once(root)),
+            branches: vec![ConjunctiveBranch::default()],
+        }];
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Disjunction { mut operands, branches, results } => {
+                    match operands.next() {
+                        Some(op) => {
+                            stack.push(Frame::Disjunction {
+                                operands,
+                                branches: branches.clone(),
+                                results,
+                            });
+                            stack.push(Frame::Sequence {
+                                exprs: Box::new(iter::once(op)),
+                                branches,
+                            });
+                        }
+                        None => {
+                            if let ControlFlow::Break(result) =
+                                Self::pass_branches_to_parent(
+                                    &mut stack, results,
+                                )
+                            {
+                                return result;
+                            }
+                        }
+                    }
+                }
+                Frame::Sequence { mut exprs, mut branches } => {
+                    match exprs.next() {
+                        Some(expr) => {
+                            stack.push(Frame::Sequence {
+                                exprs,
+                                branches: Vec::new(),
+                            });
+                            match expr {
+                                ast::Expr::Or(nary) => {
+                                    stack.push(Frame::Disjunction {
+                                        operands: Box::new(nary.operands()),
+                                        branches,
+                                        results: Vec::new(),
+                                    });
+                                }
+                                _ => {
+                                    let push_leaf = matches!(
+                                        expr,
+                                        ast::Expr::ForOf(_)
+                                            | ast::Expr::True { .. }
+                                            | ast::Expr::False { .. }
+                                            | ast::Expr::Filesize { .. }
+                                            | ast::Expr::Entrypoint { .. }
+                                            | ast::Expr::LiteralString(_)
+                                            | ast::Expr::LiteralInteger(_)
+                                            | ast::Expr::LiteralFloat(_)
+                                            | ast::Expr::Regexp(_)
+                                            | ast::Expr::Ident(_)
+                                            | ast::Expr::PatternMatch(_)
+                                            | ast::Expr::PatternCount(_)
+                                            | ast::Expr::PatternOffset(_)
+                                            | ast::Expr::PatternLength(_)
+                                            | ast::Expr::Of(_)
+                                    );
+                                    // Every active branch in `branches` gets the
+                                    // leaf expression pushed onto its `.exprs` list.
+                                    if push_leaf {
+                                        for b in &mut branches {
+                                            b.exprs.push(expr);
+                                        }
+                                    }
+                                    stack.push(Frame::Sequence {
+                                        exprs: expr.children(),
+                                        branches,
+                                    });
+                                }
+                            }
+                        }
+                        None => {
+                            if let ControlFlow::Break(result) =
+                                Self::pass_branches_to_parent(
+                                    &mut stack, branches,
+                                )
+                            {
+                                return result;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Unreachable: the stack loop always terminates when
+        // pass_branches_to_parent evaluates the top-level root frame and
+        // returns ControlFlow::Break.
+        unreachable!()
+    }
+
+    /// Passes finished conjunctive branches from a completed frame to its parent
+    /// frame on the stack. If there is no parent frame remaining (i.e. top-level
+    /// root frame completed), returns `ControlFlow::Break(Some(finished_branches))`.
+    /// Returns `ControlFlow::Break(None)` if `MAX_BRANCHES` is exceeded.
+    fn pass_branches_to_parent(
+        stack: &mut [Frame<'src>],
+        finished: Vec<ConjunctiveBranch<'src>>,
+    ) -> ControlFlow<Option<Vec<ConjunctiveBranch<'src>>>> {
+        if finished.len() > Self::MAX_BRANCHES {
+            return ControlFlow::Break(None);
+        }
+
+        let finished = if finished.is_empty() {
+            vec![ConjunctiveBranch::default()]
+        } else {
+            finished
+        };
+
+        if let Some(parent) = stack.last_mut() {
+            match parent {
+                Frame::Disjunction { results, .. } => {
+                    // Collect alternative branches from this disjunction operand
+                    results.extend(finished);
+                    if results.len() > Self::MAX_BRANCHES {
+                        return ControlFlow::Break(None);
+                    }
+                }
+                Frame::Sequence { branches, .. } => {
+                    // Update sequential input branches for the next sibling child
+                    *branches = finished;
+                }
+            }
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(Some(finished))
+        }
+    }
+}
+
+/// Checks wildcard pattern set items (e.g. `$s*`) for patterns that are
+/// included in the set but also explicitly used outside the set in the same
+/// conjunctive branch (expressions that must be true at the same time), or
+/// matched by another set with a more specific (longer) prefix in the same
+/// branch.
+fn check_unintended_patterns_in_sets<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    condition: &'src ast::Expr<'src>,
+) {
+    // Decompose condition AST into DNF execution paths (conjunctive branches).
+    let Some(conjunctive_branches) = ConjunctiveBranches::from_expr(condition)
+    else {
+        return;
+    };
+    let mut reported = std::collections::HashSet::new();
+
+    for branch in conjunctive_branches.branches() {
+        let mut explicit_patterns = Vec::new();
+        let mut wildcard_pattern_sets = Vec::new();
+
+        // Extract explicit pattern presence checks and wildcard pattern sets
+        // active within this specific conjunctive branch.
+        for expr in branch.exprs() {
+            match expr {
+                // Direct pattern match (e.g. `$s1` or `$s1 at 100`).
+                ast::Expr::PatternMatch(pm) => {
+                    if !pm.identifier.name.is_empty() {
+                        explicit_patterns
+                            .push((pm.identifier.name, pm.identifier.span()));
+                    }
+                }
+                // Pattern set in `of` expressions (e.g. `1 of ($s1, $s*)`).
+                ast::Expr::Of(of) => {
+                    if let ast::OfItems::PatternSet(ast::PatternSet::Set(
+                        set,
+                    )) = &of.items
+                    {
+                        for item in set {
+                            if item.wildcard {
+                                wildcard_pattern_sets
+                                    .push((item.identifier, item.span()));
+                            } else {
+                                explicit_patterns
+                                    .push((item.identifier, item.span()));
+                            }
+                        }
+                    }
+                }
+                // Pattern set in `for ... of` loops.
+                ast::Expr::ForOf(for_of) => {
+                    if let ast::PatternSet::Set(set) = &for_of.pattern_set {
+                        for item in set {
+                            if item.wildcard {
+                                wildcard_pattern_sets
+                                    .push((item.identifier, item.span()));
+                            } else {
+                                explicit_patterns
+                                    .push((item.identifier, item.span()));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // For each wildcard pattern set in this branch, check if any rule
+        // pattern matching the set's prefix is also explicitly used in the
+        // same branch, or matched by a longer (more specific) prefix set.
+        for (s1, span1) in &wildcard_pattern_sets {
+            for pattern in ctx.current_rule_patterns.iter() {
+                let pat = pattern.identifier().name;
+                if pat.starts_with(s1) {
+                    let (label1, span1, label2, span2) =
+                        if let Some((_, span2)) = explicit_patterns
+                            .iter()
+                            .find(|(name, _)| *name == pat)
+                        {
+                            if span1.start() < span2.start() {
+                                (
+                                    format!("`{pat}` is included in `{s1}*`"),
+                                    span1,
+                                    format!("`{pat}` is also used here"),
+                                    span2,
+                                )
+                            } else {
+                                (
+                                    format!("`{pat}` is used here"),
+                                    span2,
+                                    format!(
+                                        "`{pat}` is also included in `{s1}*`"
+                                    ),
+                                    span1,
+                                )
+                            }
+                        } else if let Some((s2, span2)) = wildcard_pattern_sets
+                            .iter()
+                            .find(|(prefix2, _)| {
+                                prefix2.len() > s1.len()
+                                    && pat.starts_with(prefix2)
+                            })
+                        {
+                            if span1.start() < span2.start() {
+                                (
+                                    format!("`{pat}` is included in `{s1}*`"),
+                                    span1,
+                                    format!(
+                                        "`{pat}` is also included in `{s2}*`"
+                                    ),
+                                    span2,
+                                )
+                            } else {
+                                (
+                                    format!("`{pat}` is included in `{s2}*`"),
+                                    span2,
+                                    format!(
+                                        "`{pat}` is also included in `{s1}*`"
+                                    ),
+                                    span1,
+                                )
+                            }
+                        } else {
+                            continue;
+                        };
+
+                    if reported.insert((pat, span1.clone())) {
+                        ctx.warnings.add(|| {
+                            warnings::UnintendedPatternInSet::build(
+                                ctx.report_builder,
+                                pat.to_string(),
+                                format!("{s1}*"),
+                                label1,
+                                ctx.report_builder
+                                    .span_to_code_loc(span1.clone()),
+                                label2,
+                                ctx.report_builder
+                                    .span_to_code_loc(span2.clone()),
+                            )
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn func_call_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    func_call: &ast::FuncCall<'src>,
 ) -> Result<ExprId, CompileError> {
     let mut object = if let Some(obj) = &func_call.object {
         let expr = expr_from_ast(ctx, obj)?;
@@ -1911,9 +2373,9 @@ fn func_call_from_ast(
     Ok(ctx.ir.func_call(object, args, matching_signature.clone()))
 }
 
-fn matches_expr_from_ast(
-    ctx: &mut CompileContext,
-    expr: &ast::BinaryExpr,
+fn matches_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    expr: &ast::BinaryExpr<'src>,
 ) -> Result<ExprId, CompileError> {
     let lhs_span = expr.lhs.span();
     let rhs_span = expr.rhs.span();
@@ -2127,9 +2589,9 @@ pub(in crate::compiler) fn warn_if_not_bool(
 
 macro_rules! gen_unary_op {
     ($name:ident, $variant:ident, $( $accepted_types:path )|+, $check_fn:expr) => {
-        fn $name(
-            ctx: &mut CompileContext,
-            expr: &ast::UnaryExpr,
+        fn $name<'src>(
+            ctx: &mut CompileContext<'_, 'src>,
+            expr: &ast::UnaryExpr<'src>,
         ) -> Result<ExprId, CompileError> {
             let operand = expr_from_ast(ctx, &expr.operand)?;
 
@@ -2155,9 +2617,9 @@ macro_rules! gen_unary_op {
 
 macro_rules! gen_binary_op {
     ($name:ident, $variant:ident, $( $accepted_types:path )|+, $compatible_types:expr, $check_fn:expr) => {
-        fn $name(
-            ctx: &mut CompileContext,
-            expr: &ast::BinaryExpr,
+        fn $name<'src>(
+            ctx: &mut CompileContext<'_, 'src>,
+            expr: &ast::BinaryExpr<'src>,
         ) -> Result<ExprId, CompileError> {
             let lhs_span = expr.lhs.span();
             let rhs_span = expr.rhs.span();
@@ -2190,9 +2652,9 @@ macro_rules! gen_binary_op {
 
 macro_rules! gen_string_op {
     ($name:ident, $variant:ident) => {
-        fn $name(
-            ctx: &mut CompileContext,
-            expr: &ast::BinaryExpr,
+        fn $name<'src>(
+            ctx: &mut CompileContext<'_, 'src>,
+            expr: &ast::BinaryExpr<'src>,
         ) -> Result<ExprId, CompileError> {
             let lhs_span = expr.lhs.span();
             let rhs_span = expr.rhs.span();
@@ -2217,9 +2679,9 @@ macro_rules! gen_string_op {
 
 macro_rules! gen_n_ary_operation {
     ($name:ident, $variant:ident, $( $accepted_types:path )|+, $compatible_types:expr, $check_fn:expr) => {
-        fn $name(
-            ctx: &mut CompileContext,
-            expr: &ast::NAryExpr,
+        fn $name<'src>(
+            ctx: &mut CompileContext<'_, 'src>,
+            expr: &ast::NAryExpr<'src>,
         ) -> Result<ExprId, CompileError> {
             let span = expr.span();
             let accepted_types = &[$( $accepted_types ),+];
@@ -2315,9 +2777,9 @@ gen_n_ary_operation!(
     })
 );
 
-fn or_expr_from_ast(
-    ctx: &mut CompileContext,
-    expr: &ast::NAryExpr,
+fn or_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    expr: &ast::NAryExpr<'src>,
 ) -> Result<ExprId, CompileError> {
     let span = expr.span();
     let accepted_types =

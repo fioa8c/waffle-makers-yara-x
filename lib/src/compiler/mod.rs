@@ -5,7 +5,6 @@ module implements the YARA compiler.
 */
 
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -83,6 +82,63 @@ pub mod errors;
 pub mod linters;
 pub mod warnings;
 pub mod wsh;
+
+/// The reason why a rule was ignored during compilation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IgnoredRuleReason<'a> {
+    /// The rule was ignored because it depends on a module that was ignored
+    /// with [`Compiler::ignore_module`]. Contains the name of the ignored
+    /// module.
+    IgnoredModule(&'a str),
+    /// The rule was ignored because it depends on another rule that was
+    /// ignored. Contains the name of the ignored rule it depends on.
+    IgnoredRule(&'a str),
+    /// The rule was ignored because of a compilation error. Contains a
+    /// reference to the error that caused compilation to fail.
+    CompileError(&'a CompileError),
+}
+
+/// Internal version of [`IgnoredRuleReason`].
+///
+/// This is the version that is stored in the compiler.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IgnoredRuleReasonInternal {
+    IgnoredModule(String),
+    IgnoredRule(String),
+    CompileError(usize),
+}
+
+/// Iterator that yields rules ignored during compilation.
+pub struct IgnoredRules<'a> {
+    iter: std::slice::Iter<'a, (String, IgnoredRuleReasonInternal)>,
+    errors: &'a [CompileError],
+}
+
+impl<'a> Iterator for IgnoredRules<'a> {
+    type Item = (&'a str, IgnoredRuleReason<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (rule_name, reason) = self.iter.next()?;
+        let reason = match reason {
+            IgnoredRuleReasonInternal::IgnoredModule(module) => {
+                IgnoredRuleReason::IgnoredModule(module.as_str())
+            }
+            IgnoredRuleReasonInternal::IgnoredRule(rule_name) => {
+                IgnoredRuleReason::IgnoredRule(rule_name.as_str())
+            }
+            IgnoredRuleReasonInternal::CompileError(err_idx) => {
+                IgnoredRuleReason::CompileError(&self.errors[*err_idx])
+            }
+        };
+        Some((rule_name, reason))
+    }
+}
+
+impl ExactSizeIterator for IgnoredRules<'_> {
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+}
 
 /// A structure that describes some YARA source code.
 ///
@@ -339,30 +395,6 @@ pub struct Compiler<'a> {
     /// function name (e.g: `my_module.my_struct.my_func@ii@i`)
     wasm_exports: FxHashMap<String, FunctionId>,
 
-    /// Map that associates a `PatternId` to a certain filesize bound.
-    ///
-    /// A condition like `filesize < 1000 and $a` only matches if `filesize`
-    /// is less than 1000. Therefore, the pattern `$a` does not need be
-    /// checked for files of size 1000 bytes or larger.
-    ///
-    /// In this case, the map will contain an entry associating `$a` to a
-    /// `FilesizeBounds` value like:
-    /// `FilesizeBounds{start: Bound::Unbounded, end: Bound:Excluded(1000)}`.
-    filesize_bounds: FxHashMap<PatternId, FilesizeBounds>,
-
-    /// Map that associates a `PatternId` to a certain constraint on the
-    /// file header (e.g. magic bytes at offset 0), if any.
-    ///
-    /// A condition like `uint16(0) == 0x5A4D and $a` or `$mz at 0 and $a`
-    /// (were $mz = "MZ") only matches if the file starts with "MZ" (0x5A4D).
-    /// In this case the map will contain an entry associating `$a` to a
-    /// `HeaderConstraint` that requires the file to start with those two
-    /// bytes.
-    ///
-    /// This allows skipping pattern checks entirely if the scanned data doesn't
-    /// start with the expected header prefix.
-    header_constraints: FxHashMap<PatternId, HeaderConstraint>,
-
     /// A vector with all the rules that has been compiled. A [`RuleId`] is
     /// an index in this vector.
     rules: Vec<RuleInfo>,
@@ -418,10 +450,14 @@ pub struct Compiler<'a> {
     /// if the banned module is imported.
     banned_modules: FxHashMap<String, (String, String)>,
 
+    /// Vector containing the names of the rules that were ignored during
+    /// compilation, along with the reason why they were ignored.
+    ignored_rules: Vec<(String, IgnoredRuleReasonInternal)>,
+
     /// Keys in this map are the name of rules that will be ignored because they
     /// depend on unsupported modules, either directly or indirectly. Values are
     /// the names of the unsupported modules they depend on.
-    ignored_rules: FxHashMap<String, String>,
+    rules_depending_on_unsupported_modules: FxHashMap<String, String>,
 
     /// Structure where each field corresponds to a global identifier or a module
     /// imported by the rules. For fields corresponding to modules, the value is
@@ -447,12 +483,14 @@ pub struct Compiler<'a> {
     linters: Vec<Box<dyn linters::Linter + 'a>>,
 
     /// Grouped RegexSets constructed during IR creation for or-expressions.
-    pub(crate) regex_sets: FxHashMap<RegexSetId, Vec<RegexId>>,
+    regex_sets: FxHashMap<RegexSetId, Vec<RegexId>>,
 }
 
 impl<'a> Compiler<'a> {
     /// Creates a new YARA compiler.
     pub fn new() -> Self {
+        crate::init_logger();
+
         let mut ident_pool = StringPool::new();
         let mut symbol_table = StackedSymbolTable::new();
 
@@ -529,9 +567,8 @@ impl<'a> Compiler<'a> {
             imported_modules: Vec::new(),
             ignored_modules: FxHashSet::default(),
             banned_modules: FxHashMap::default(),
-            ignored_rules: FxHashMap::default(),
-            filesize_bounds: FxHashMap::default(),
-            header_constraints: FxHashMap::default(),
+            ignored_rules: Vec::new(),
+            rules_depending_on_unsupported_modules: FxHashMap::default(),
             root_struct: Struct::new().make_root(),
             report_builder: ReportBuilder::new(),
             lit_pool: BStringPool::new(),
@@ -779,7 +816,7 @@ impl<'a> Compiler<'a> {
             ident_id: self.ident_pool.get_or_intern(namespace),
             symbols: self.symbol_table.push_new(),
         };
-        self.ignored_rules.clear();
+        self.rules_depending_on_unsupported_modules.clear();
         self.wasm_mod.new_namespace();
         self
     }
@@ -825,12 +862,26 @@ impl<'a> Compiler<'a> {
         )
         .expect("failed to serialize global variables");
 
+        let mut filesize_bounds = FxHashMap::default();
+        let mut header_constraints = FxHashMap::default();
+
+        for (pattern, pattern_id) in self.patterns {
+            if !pattern.filesize_bounds().unbounded() {
+                filesize_bounds
+                    .insert(pattern_id, pattern.filesize_bounds().clone());
+            }
+            if !pattern.header_constraints().unconstrained() {
+                header_constraints
+                    .insert(pattern_id, pattern.header_constraints().clone());
+            }
+        }
+
         let mut rules = Rules {
             serialized_globals,
             wasm_mod,
             compiled_wasm_mod: Some(compiled_wasm_mod),
             relaxed_re_syntax: self.relaxed_re_syntax,
-            ac: None,
+            ac: AhoCorasick::default(),
             num_patterns: self.next_pattern_id.0 as usize,
             ident_pool: self.ident_pool,
             regex_pool: self.regex_pool,
@@ -842,10 +893,11 @@ impl<'a> Compiler<'a> {
             atoms: self.atoms,
             re_code: self.re_code,
             warnings: self.warnings.into(),
-            filesize_bounds: self.filesize_bounds,
-            header_constraints: self.header_constraints,
+            filesize_bounds,
+            header_constraints,
             regex_sets: self.regex_sets,
             fast_scan_patterns: self.fast_scan_patterns,
+            rules_profiling_enabled: cfg!(feature = "rules-profiling"),
         };
 
         rules.build_ac_automaton();
@@ -1111,6 +1163,16 @@ impl<'a> Compiler<'a> {
         self.warnings.as_slice()
     }
 
+    /// Returns an iterator over the rules that were ignored during
+    /// compilation, along with the reason why they were ignored.
+    #[inline]
+    pub fn ignored_rules(&self) -> IgnoredRules<'_> {
+        IgnoredRules {
+            iter: self.ignored_rules.iter(),
+            errors: self.errors.as_slice(),
+        }
+    }
+
     /// Emits a `.wasm` file with the WASM module generated by the compiler.
     ///
     /// This file can be inspected and converted to WASM text format by using
@@ -1263,18 +1325,19 @@ impl Compiler<'_> {
         self.fast_scan_patterns.truncate(snapshot.fast_scan_patterns_len);
         self.pattern_diagnostics.truncate(snapshot.pattern_diagnostics_len);
 
-        // Pattern IDs that are >= next_pattern_id, are being discarded. Any pattern
-        // or file size bound associated to such IDs must be removed.
-
+        // Pattern IDs that are >= next_pattern_id are being discarded. Any pattern
+        // associated to such IDs must be removed.
         self.patterns
             .retain(|_, pattern_id| *pattern_id < snapshot.next_pattern_id);
-
-        self.filesize_bounds
-            .retain(|pattern_id, _| *pattern_id < snapshot.next_pattern_id);
     }
 
-    /// Returns true if the bytes in the slice are all 0x00, 0x90, or 0xff.
-    fn common_byte_repetition(bytes: &[u8]) -> bool {
+    /// Returns true if the slice contains a single byte, or if the bytes in
+    /// the slice are all 0x00, 0x90, or 0xff.
+    fn is_slow_pattern_bytes(bytes: &[u8]) -> bool {
+        if bytes.len() == 1 {
+            return true;
+        }
+
         let mut all_x00 = true;
         let mut all_x90 = true;
         let mut all_xff = true;
@@ -1300,7 +1363,7 @@ impl Compiler<'_> {
             }
         }
 
-        true
+        !bytes.is_empty()
     }
 
     /// Reads the file specified by an `include` statement.
@@ -1488,6 +1551,12 @@ impl Compiler<'_> {
                 }
                 ast::Item::Rule(rule) => {
                     if let Err(err) = self.c_rule(rule) {
+                        self.ignored_rules.push((
+                            rule.identifier.name.to_string(),
+                            IgnoredRuleReasonInternal::CompileError(
+                                self.errors.len(),
+                            ),
+                        ));
                         self.errors.push(err);
                     }
                 }
@@ -1643,7 +1712,7 @@ impl Compiler<'_> {
                     Pattern::Hex(re) => re.hir.as_literal_bytes(),
                 };
                 if let Some(literal_bytes) = literal_bytes
-                    && Self::common_byte_repetition(literal_bytes)
+                    && Self::is_slow_pattern_bytes(literal_bytes)
                 {
                     if self.pattern_diagnostics_enabled {
                         self.pattern_diagnostics
@@ -1658,68 +1727,104 @@ impl Compiler<'_> {
                             culprits: Vec::new(),
                         });
                     }
-                    self.warnings.add(|| {
-                        warnings::SlowPattern::build(
+                    if self.error_on_slow_pattern {
+                        self.restore_snapshot(snapshot);
+                        return Err(errors::SlowPattern::build(
                             &self.report_builder,
                             self.report_builder
                                 .span_to_code_loc(pat.span().clone()),
                             None,
-                        )
-                    });
+                        ));
+                    } else {
+                        self.warnings.add(|| {
+                            warnings::SlowPattern::build(
+                                &self.report_builder,
+                                self.report_builder
+                                    .span_to_code_loc(pat.span().clone()),
+                                None,
+                            )
+                        });
+                    }
                 }
             }
         }
 
-        // In case of error, restore the compiler to the state it was before
-        // entering this function. Also, if the error is due to an unknown
-        // identifier, but the identifier is one of the unsupported modules,
-        // the error is tolerated and a warning is issued instead.
         let mut condition = match condition {
             Ok(condition) => condition,
-            Err(CompileError::UnknownIdentifier(unknown))
-                if self.ignored_rules.contains_key(unknown.identifier())
-                    || self.ignored_modules.contains(unknown.identifier()) =>
-            {
-                self.restore_snapshot(snapshot);
-
-                if let Some(module_name) =
-                    self.ignored_rules.get(unknown.identifier())
-                {
-                    self.warnings.add(|| {
-                        warnings::IgnoredRule::build(
-                            &self.report_builder,
-                            module_name.clone(),
-                            rule.identifier.name.to_string(),
-                            unknown.identifier_location().clone(),
-                        )
-                    });
-                    self.ignored_rules.insert(
-                        rule.identifier.name.to_string(),
-                        module_name.clone(),
-                    );
-                } else {
-                    self.warnings.add(|| {
-                        warnings::IgnoredModule::build(
-                            &self.report_builder,
-                            unknown.identifier().to_string(),
-                            unknown.identifier_location().clone(),
-                            Some(format!(
-                                "the whole rule `{}` will be ignored",
-                                rule.identifier.name
-                            )),
-                        )
-                    });
-                    self.ignored_rules.insert(
-                        rule.identifier.name.to_string(),
-                        unknown.identifier().to_string(),
-                    );
-                }
-
-                return Ok(());
-            }
             Err(err) => {
+                // In case of error, restore the compiler to the state it was
+                // before entering this function.
                 self.restore_snapshot(snapshot);
-                return Err(err);
+
+                return match err {
+                    // If the error is due to an unknown identifier, and the
+                    // identifier is one of the ignored modules, the error
+                    // is tolerated and a warning is issued instead.
+                    CompileError::UnknownIdentifier(unknown)
+                        if self
+                            .ignored_modules
+                            .contains(unknown.identifier()) =>
+                    {
+                        self.warnings.add(|| {
+                            IgnoredModule::build(
+                                &self.report_builder,
+                                unknown.identifier().to_string(),
+                                unknown.identifier_location().clone(),
+                                Some(format!(
+                                    "the whole rule `{}` will be ignored",
+                                    rule.identifier.name
+                                )),
+                            )
+                        });
+                        self.rules_depending_on_unsupported_modules.insert(
+                            rule.identifier.name.to_string(),
+                            unknown.identifier().to_string(),
+                        );
+                        self.ignored_rules.push((
+                            rule.identifier.name.to_string(),
+                            IgnoredRuleReasonInternal::IgnoredModule(
+                                unknown.identifier().to_string(),
+                            ),
+                        ));
+
+                        Ok(())
+                    }
+                    // If the unknown identifier corresponds to one of the rules
+                    // that depends directly or indirectly on an ignored module,
+                    // the error is tolerated and a warning is issued instead.
+                    CompileError::UnknownIdentifier(unknown) => {
+                        if let Some(unsupported_module) = self
+                            .rules_depending_on_unsupported_modules
+                            .get(unknown.identifier())
+                        {
+                            self.warnings.add(|| {
+                                IgnoredRule::build(
+                                    &self.report_builder,
+                                    unsupported_module.clone(),
+                                    rule.identifier.name.to_string(),
+                                    unknown.identifier_location().clone(),
+                                )
+                            });
+                            self.rules_depending_on_unsupported_modules
+                                .insert(
+                                    rule.identifier.name.to_string(),
+                                    unsupported_module.clone(),
+                                );
+                            self.ignored_rules.push((
+                                rule.identifier.name.to_string(),
+                                IgnoredRuleReasonInternal::IgnoredRule(
+                                    unknown.identifier().to_string(),
+                                ),
+                            ));
+
+                            Ok(())
+                        } else {
+                            Err(CompileError::UnknownIdentifier(unknown))
+                        }
+                    }
+                    // Any other kind of error is not tolerated.
+                    _ => Err(err),
+                };
             }
         };
 
@@ -1734,28 +1839,28 @@ impl Compiler<'_> {
         // Analyze the condition and determine if it imposes some constraint
         // to the file header (ex: `uint16(0) == 0x5a4d`).
         let header_constraints = self.ir.header_constraints(|pat_idx| {
-            let pat = &rule_patterns[pat_idx.as_usize()];
-            match pat.pattern() {
-                Pattern::Text(lit) => Some(lit.text.as_bytes().to_vec()),
-                Pattern::Regexp(re) | Pattern::Hex(re) => {
-                    re.hir.as_literal_bytes().map(|bytes| bytes.to_vec())
-                }
-            }
+            rule_patterns[pat_idx.as_usize()].pattern()
         });
 
-        // Set the bounds to all patterns in the rule. This must be done
+        // Set the bounds to all regex patterns in the rule. This must be done
         // before assigning the PatternId to each pattern, as the filesize
         // bounds are taken into account when determining if the pattern
         // is unique or re-used from a previous rule.
         if !filesize_bounds.unbounded() {
-            for pattern in &mut rule_patterns {
+            for pattern in &mut rule_patterns
+                .iter_mut()
+                .filter(|p| p.pattern().is_regex())
+            {
                 pattern.pattern_mut().set_filesize_bounds(&filesize_bounds);
             }
         }
 
-        // Set header constraints to all patterns in the rule.
+        // Set header constraints to all regex patterns in the rule.
         if !header_constraints.unconstrained() {
-            for pattern in &mut rule_patterns {
+            for pattern in &mut rule_patterns
+                .iter_mut()
+                .filter(|p| p.pattern().is_regex())
+            {
                 pattern
                     .pattern_mut()
                     .set_header_constraints(&header_constraints);
@@ -1792,27 +1897,24 @@ impl Compiler<'_> {
                 num_private_patterns += 1;
             }
 
-            // Check if this pattern has been declared before, in this rule or
-            // in some other rule. In such cases the pattern ID is re-used, and
-            // we don't need to process (i.e: extract atoms and add them to
-            // Aho-Corasick automaton) the pattern again. Two patterns are
-            // considered equal if they are exactly the same, including any
-            // modifiers associated to the pattern, both are non-anchored
-            // or anchored at the same file offset, and if they have the same
-            // file size bounds.
             let pattern_id =
-                match self.patterns.entry(pattern.pattern().clone()) {
-                    // The pattern already exists, return the existing ID.
-                    Entry::Occupied(entry) => *entry.get(),
-                    // The pattern didn't exist.
-                    Entry::Vacant(entry) => {
-                        let pattern_id = self.next_pattern_id;
-                        self.next_pattern_id.incr(1);
-                        self.fast_scan_patterns.push(true);
-                        pending_patterns.insert(pattern_id);
-                        entry.insert(pattern_id);
-                        pattern_id
-                    }
+                // Check if this pattern has been declared before, in this rule or
+                // in some other rule. In such cases the pattern ID is re-used, and
+                // we don't need to process (i.e: extract atoms and add them to
+                // Aho-Corasick automaton) the pattern again. Two patterns are
+                // considered equal if they are exactly the same, including any
+                // modifiers associated to the pattern, both are non-anchored
+                // or anchored at the same file offset, and if they have the same
+                // file size bounds.
+                if let Some(pattern_id) = self.patterns.get(pattern.pattern()) {
+                    *pattern_id
+                } else {
+                    let pattern_id = self.next_pattern_id;
+                    self.next_pattern_id.incr(1);
+                    self.fast_scan_patterns.push(true);
+                    pending_patterns.insert(pattern_id);
+                    self.patterns.insert(pattern.pattern().clone(), pattern_id);
+                    pattern_id
                 };
 
             if !pattern.fast_scan_allowed() {
@@ -1887,28 +1989,6 @@ impl Compiler<'_> {
                         }
                     }
                 };
-                if !filesize_bounds.unbounded()
-                    && self
-                        .filesize_bounds
-                        .insert(*pattern_id, filesize_bounds.clone())
-                        .is_some()
-                {
-                    // This should not happen.
-                    panic!(
-                        "modifying the file size bounds of an existing pattern"
-                    )
-                }
-                if !header_constraints.unconstrained()
-                    && self
-                        .header_constraints
-                        .insert(*pattern_id, header_constraints.clone())
-                        .is_some()
-                {
-                    // This should not happen.
-                    panic!(
-                        "modifying the header constraints of an existing pattern"
-                    )
-                }
                 pending_patterns.remove(pattern_id);
             }
         }
@@ -1963,8 +2043,7 @@ impl Compiler<'_> {
 
     fn c_import(&mut self, import: &Import) -> Result<(), CompileError> {
         let module_name = import.module_name;
-        let module = crate::modules::registered_modules()
-            .find(|m| m.name() == module_name);
+        let module = crate::modules::module_by_name(module_name);
 
         // Does a module with the given name actually exist? ...
         if module.is_none() {
@@ -2067,7 +2146,10 @@ impl Compiler<'_> {
         let mut main_patterns = Vec::new();
         let wide_pattern;
 
-        if pattern.flags.contains(PatternFlags::Wide) {
+        if pattern
+            .flags
+            .intersects(PatternFlags::WideOnly | PatternFlags::WideAndAscii)
+        {
             wide_pattern = make_wide(pattern.text.as_bytes());
             main_patterns.push((
                 wide_pattern.as_slice(),
@@ -2076,7 +2158,7 @@ impl Compiler<'_> {
             ));
         }
 
-        if pattern.flags.contains(PatternFlags::Ascii) {
+        if !pattern.flags.contains(PatternFlags::WideOnly) {
             main_patterns.push((
                 pattern.text.as_bytes(),
                 best_atom_in_bytes(pattern.text.as_bytes()),
@@ -2270,7 +2352,7 @@ impl Compiler<'_> {
         }
 
         // If this point is reached, this is a pattern that can't be split into
-        // multiple chained patterns, and is neither a literal or alternation
+        // multiple chained patterns, and is neither a literal nor alternation
         // of literals. Most patterns fall in this category.
         let mut flags = SubPatternFlags::empty();
 
@@ -2287,13 +2369,38 @@ impl Compiler<'_> {
             flags.insert(SubPatternFlags::GreedyRegexp);
         }
 
+        // If the pattern doesn't have the `nocase` or `wide` modifier, and it
+        // is a simple literal pattern with masks (e.g., `{ 01 02 ?? 04 }` or
+        // `{ 1? 2? 3? }`), we can treat it as a `LiteralWithMask` sub-pattern.
+        // This is much more efficient than executing it as a regular expression.
+        if !pattern.flags.contains(PatternFlags::Nocase)
+            && !pattern.flags.intersects(
+                PatternFlags::WideOnly | PatternFlags::WideAndAscii,
+            )
+            && let Some((pattern, mask, atoms)) =
+                head.try_extract_literal_with_mask()
+        {
+            let pattern = self.intern_literal(pattern.as_slice(), false);
+            let mask = self.intern_literal(mask.as_slice(), false);
+            self.add_sub_pattern(
+                pattern_id,
+                SubPattern::LiteralWithMask { pattern, mask, flags },
+                atoms,
+                SubPatternAtom::from_atom,
+            );
+            return Ok(());
+        };
+
         let (atoms, is_fast_regexp) = self.c_regexp(&head, span)?;
 
         if is_fast_regexp {
             flags.insert(SubPatternFlags::FastRegexp);
         }
 
-        if pattern.flags.contains(PatternFlags::Wide) {
+        if pattern
+            .flags
+            .intersects(PatternFlags::WideOnly | PatternFlags::WideAndAscii)
+        {
             self.add_sub_pattern(
                 pattern_id,
                 SubPattern::Regexp { flags: flags | SubPatternFlags::Wide },
@@ -2302,7 +2409,7 @@ impl Compiler<'_> {
             );
         }
 
-        if pattern.flags.contains(PatternFlags::Ascii) {
+        if !pattern.flags.contains(PatternFlags::WideOnly) {
             self.add_sub_pattern(
                 pattern_id,
                 SubPattern::Regexp { flags },
@@ -2321,8 +2428,9 @@ impl Compiler<'_> {
         anchored_at: Option<usize>,
         flags: PatternFlags,
     ) -> Result<(), CompileError> {
-        let ascii = flags.contains(PatternFlags::Ascii);
-        let wide = flags.contains(PatternFlags::Wide);
+        let raw = !flags.contains(PatternFlags::WideOnly);
+        let wide = flags
+            .intersects(PatternFlags::WideOnly | PatternFlags::WideAndAscii);
         let case_insensitive = flags.contains(PatternFlags::Nocase);
         let full_word = flags.contains(PatternFlags::Fullword);
 
@@ -2382,7 +2490,7 @@ impl Compiler<'_> {
 
         match hir.kind() {
             hir::HirKind::Literal(literal) => {
-                if ascii {
+                if raw {
                     process_literal(literal, false);
                 }
                 if wide {
@@ -2394,7 +2502,7 @@ impl Compiler<'_> {
                     .iter()
                     .map(|l| cast!(l.kind(), hir::HirKind::Literal));
                 for literal in literals {
-                    if ascii {
+                    if raw {
                         process_literal(literal, false);
                     }
                     if wide {
@@ -2416,8 +2524,9 @@ impl Compiler<'_> {
         flags: PatternFlags,
         span: Span,
     ) -> Result<(), CompileError> {
-        let ascii = flags.contains(PatternFlags::Ascii);
-        let wide = flags.contains(PatternFlags::Wide);
+        let raw = !flags.contains(PatternFlags::WideOnly);
+        let wide = flags
+            .intersects(PatternFlags::WideOnly | PatternFlags::WideAndAscii);
         let case_insensitive = flags.contains(PatternFlags::Nocase);
         let full_word = flags.contains(PatternFlags::Fullword);
 
@@ -2431,7 +2540,7 @@ impl Compiler<'_> {
             common_flags.insert(SubPatternFlags::GreedyRegexp);
         }
 
-        let mut prev_sub_pattern_ascii = SubPatternId(0);
+        let mut prev_sub_pattern_raw = SubPatternId(0);
         let mut prev_sub_pattern_wide = SubPatternId(0);
 
         if let hir::HirKind::Literal(literal) = leading.kind() {
@@ -2441,8 +2550,8 @@ impl Compiler<'_> {
                 flags.insert(SubPatternFlags::FullwordLeft);
             }
 
-            if ascii {
-                prev_sub_pattern_ascii =
+            if raw {
+                prev_sub_pattern_raw =
                     self.c_literal_chain_head(pattern_id, literal, flags);
             }
 
@@ -2478,8 +2587,8 @@ impl Compiler<'_> {
                 );
             }
 
-            if ascii {
-                prev_sub_pattern_ascii = self.add_sub_pattern(
+            if raw {
+                prev_sub_pattern_raw = self.add_sub_pattern(
                     pattern_id,
                     SubPattern::RegexpChainHead { flags },
                     atoms.into_iter(),
@@ -2512,11 +2621,11 @@ impl Compiler<'_> {
                         flags | SubPatternFlags::Wide,
                     );
                 };
-                if ascii {
-                    prev_sub_pattern_ascii = self.c_literal_chain_tail(
+                if raw {
+                    prev_sub_pattern_raw = self.c_literal_chain_tail(
                         pattern_id,
                         literal,
-                        prev_sub_pattern_ascii,
+                        prev_sub_pattern_raw,
                         p.gap.clone(),
                         flags,
                     );
@@ -2546,11 +2655,11 @@ impl Compiler<'_> {
                     )
                 }
 
-                if ascii {
-                    prev_sub_pattern_ascii = self.add_sub_pattern(
+                if raw {
+                    prev_sub_pattern_raw = self.add_sub_pattern(
                         pattern_id,
                         SubPattern::RegexpChainTail {
-                            chained_to: prev_sub_pattern_ascii,
+                            chained_to: prev_sub_pattern_raw,
                             gap: p.gap.clone(),
                             flags,
                         },
@@ -3020,7 +3129,18 @@ impl From<PatternId> for usize {
 /// For each pattern there's one or more sub-patterns, depending on the pattern
 /// and its modifiers. For example the pattern `"foo" ascii wide` may have one
 /// subpattern for the ascii case and another one for the wide case.
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+)]
 #[serde(transparent)]
 pub(crate) struct SubPatternId(u32);
 
@@ -3073,6 +3193,12 @@ pub(crate) enum SubPattern {
     Literal {
         pattern: LiteralId,
         anchored_at: Option<usize>,
+        flags: SubPatternFlags,
+    },
+
+    LiteralWithMask {
+        pattern: LiteralId,
+        mask: LiteralId,
         flags: SubPatternFlags,
     },
 

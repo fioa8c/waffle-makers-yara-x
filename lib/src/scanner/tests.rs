@@ -586,8 +586,10 @@ fn private_patterns() {
             strings:
                 $a = "foo" private
                 $b = "bar"
+                $c = { aa bb cc } private
+                $d = /fo.ba./ private
             condition:
-                $a and $b
+                $a and $b and $c and $d
         }
         "#,
         )
@@ -596,7 +598,8 @@ fn private_patterns() {
     let rules = compiler.build();
 
     let mut scanner = Scanner::new(&rules);
-    let scan_results = scanner.scan(b"foobar").expect("scan should not fail");
+    let scan_results =
+        scanner.scan(b"foobar\xaa\xbb\xcc").expect("scan should not fail");
 
     assert_eq!(scan_results.matching_rules().len(), 1);
 
@@ -608,21 +611,39 @@ fn private_patterns() {
     assert_eq!(patterns.len(), 0);
     assert!(patterns.next().is_none());
 
+    // Iterate all patterns, including private ones.
     let mut patterns = rule.patterns().include_private(true);
-    assert_eq!(patterns.len(), 2);
+    assert_eq!(patterns.len(), 4);
     assert_eq!(patterns.next().unwrap().identifier(), "$a");
-    assert_eq!(patterns.len(), 1);
+    assert_eq!(patterns.len(), 3);
     assert_eq!(patterns.next().unwrap().identifier(), "$b");
+    assert_eq!(patterns.len(), 2);
+    assert_eq!(patterns.next().unwrap().identifier(), "$c");
+    assert_eq!(patterns.len(), 1);
+    assert_eq!(patterns.next().unwrap().identifier(), "$d");
     assert_eq!(patterns.len(), 0);
     assert!(patterns.next().is_none());
 
+    // Start iterating non-private patterns only...
     let mut patterns = rule.patterns();
 
+    // There is only one, which is $b.
     assert_eq!(patterns.len(), 1);
     assert_eq!(patterns.next().unwrap().identifier(), "$b");
     assert_eq!(patterns.len(), 0);
 
+    // Turn on private patterns after $b.
     let mut patterns = patterns.include_private(true);
+
+    // Now we have $c and $d.
+    assert_eq!(patterns.len(), 2);
+    assert_eq!(patterns.next().unwrap().identifier(), "$c");
+
+    // Turn off private patterns again after $c.
+    let mut patterns = patterns.include_private(false);
+
+    // No more patterns, $d is not returned because it is private.
+    assert_eq!(patterns.len(), 0);
     assert!(patterns.next().is_none());
 }
 
@@ -1295,4 +1316,78 @@ fn fast_scan_mode() {
     let mut patterns_c =
         test_count.patterns().filter(|p| p.identifier() == "$c");
     assert_eq!(patterns_c.next().unwrap().matches().len(), 2);
+}
+
+#[test]
+fn test_pikevm_literal_run_optimization() {
+    let rules = crate::compile(
+        r#"
+        rule test_opt {
+            strings:
+                $a = /abcdefg.*hijk.*lmno/
+            condition:
+                $a
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    let results = scanner.scan(b"abcdefg_hijk_lmno").unwrap();
+    assert_eq!(results.matching_rules().count(), 1);
+
+    let results = scanner.scan(b"abcdefg_hijk_lmn").unwrap();
+    assert_eq!(results.matching_rules().count(), 0);
+
+    let results = scanner.scan(b"abcdef_hijk_lmno").unwrap();
+    assert_eq!(results.matching_rules().count(), 0);
+}
+
+#[test]
+fn test_slow_rule_hang() {
+    let rules = crate::compile(
+        r#"
+        rule test {
+            strings:
+                $zero_padding = /\x00{860,}/
+            condition:
+                $zero_padding
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+    let data = vec![0u8; 2000];
+    let results = scanner.scan(&data).unwrap();
+    assert_eq!(results.matching_rules().count(), 1);
+}
+
+#[test]
+fn test_teddy_scan_timeout() {
+    use std::time::Duration;
+
+    let rules = crate::compile(
+        r#"
+        rule test {
+            strings:
+                $a = "abcd"
+            condition:
+                $a
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+    scanner.set_timeout(Duration::from_secs(1));
+
+    let mut data = Vec::with_capacity(10_000_000);
+    for _ in 0..2_500_000 {
+        data.extend_from_slice(b"abcd");
+    }
+
+    let err = scanner.scan(&data).unwrap_err();
+    assert_eq!(err.to_string(), "timeout");
 }
