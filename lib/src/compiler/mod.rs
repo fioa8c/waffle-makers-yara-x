@@ -7,6 +7,7 @@ module implements the YARA compiler.
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(feature = "logging")]
@@ -31,9 +32,9 @@ use yara_x_parser::{Parser, Span};
 use crate::compiler::base64::base64_patterns;
 use crate::compiler::emit::{EmitContext, emit_rule_condition};
 use crate::compiler::errors::{
-    CompileError, ConflictingRuleIdentifier, CustomError, DuplicateRule,
-    DuplicateTag, EmitWasmError, InvalidRegexp, InvalidUTF8, UnknownModule,
-    UnusedPattern,
+    CompileError, ConditionTooLarge, ConflictingRuleIdentifier, CustomError,
+    DuplicateRule, DuplicateTag, EmitWasmError, InvalidRegexp, InvalidUTF8,
+    UnknownModule, UnusedPattern,
 };
 use crate::compiler::report::ReportBuilder;
 use crate::compiler::{CompileContext, VarStack};
@@ -262,6 +263,8 @@ struct Namespace {
     id: NamespaceId,
     ident_id: IdentId,
     symbols: Rc<RefCell<SymbolTable>>,
+    global_filesize_bounds: FilesizeBounds,
+    global_header_constraints: HeaderConstraint,
 }
 
 /// Compiles YARA source code producing a set of compiled [`Rules`].
@@ -374,7 +377,7 @@ pub struct Compiler<'a> {
     /// capable of storing [`bstr::BString`] must be used, the [`String`] type
     /// only accepts valid UTF-8. This pool also stores the atoms extracted
     /// from patterns.
-    lit_pool: BStringPool<LiteralId>,
+    literal_pool: BStringPool<LiteralId>,
 
     /// Intermediate representation (IR) tree for condition of the rule that
     /// is currently being compiled. After compiling each rule the tree is
@@ -402,9 +405,10 @@ pub struct Compiler<'a> {
     /// Next (not used yet) [`PatternId`].
     next_pattern_id: PatternId,
 
-    /// Vector where the N-th boolean indicates whether the pattern with
-    /// PatternId = N is a fast-scan pattern.
-    fast_scan_patterns: bitvec::vec::BitVec,
+    /// Vector where the N-th element indicates the maximum number of matches
+    /// required in fast-scan mode for the pattern with PatternId = N, or
+    /// `None` if all matches must be tracked.
+    fast_scan_max_matches: Vec<Option<NonZeroU32>>,
 
     /// Map used for de-duplicating pattern. Keys are the pattern's IR and
     /// values are the `PatternId` assigned to each pattern. Every time a rule
@@ -484,6 +488,13 @@ pub struct Compiler<'a> {
 
     /// Grouped RegexSets constructed during IR creation for or-expressions.
     regex_sets: FxHashMap<RegexSetId, Vec<RegexId>>,
+
+    /// Grouped LiteralSets constructed during IR creation for or-expressions.
+    literal_sets: FxHashMap<LiteralSetId, Vec<LiteralId>>,
+
+    /// Constraints on filesize and header associated with each rule. A
+    /// [`RuleId`] is an index in this vector.
+    rule_constraints: Vec<(FilesizeBounds, HeaderConstraint)>,
 }
 
 impl<'a> Compiler<'a> {
@@ -514,6 +525,8 @@ impl<'a> Compiler<'a> {
             id: NamespaceId(0),
             ident_id: ident_pool.get_or_intern("default"),
             symbols: symbol_table.push_new(),
+            global_filesize_bounds: FilesizeBounds::default(),
+            global_header_constraints: HeaderConstraint::default(),
         };
 
         // At this point the symbol table (which is a stacked symbol table) has
@@ -554,7 +567,7 @@ impl<'a> Compiler<'a> {
             current_pattern_ident: None,
             error_on_slow_loop: false,
             next_pattern_id: PatternId(0),
-            fast_scan_patterns: bitvec::vec::BitVec::new(),
+            fast_scan_max_matches: Vec::new(),
             current_namespace: default_namespace,
             features: FxHashSet::default(),
             warnings: Warnings::default(),
@@ -571,7 +584,7 @@ impl<'a> Compiler<'a> {
             rules_depending_on_unsupported_modules: FxHashMap::default(),
             root_struct: Struct::new().make_root(),
             report_builder: ReportBuilder::new(),
-            lit_pool: BStringPool::new(),
+            literal_pool: BStringPool::new(),
             regex_pool: StringPool::new(),
             patterns: FxHashMap::default(),
             ir_writer: None,
@@ -580,6 +593,8 @@ impl<'a> Compiler<'a> {
             includes_enabled: true,
             include_stack: Vec::new(),
             regex_sets: FxHashMap::default(),
+            literal_sets: FxHashMap::default(),
+            rule_constraints: Vec::new(),
         }
     }
 
@@ -815,6 +830,8 @@ impl<'a> Compiler<'a> {
             id: NamespaceId(self.current_namespace.id.0 + 1),
             ident_id: self.ident_pool.get_or_intern(namespace),
             symbols: self.symbol_table.push_new(),
+            global_filesize_bounds: FilesizeBounds::default(),
+            global_header_constraints: HeaderConstraint::default(),
         };
         self.rules_depending_on_unsupported_modules.clear();
         self.wasm_mod.new_namespace();
@@ -826,8 +843,79 @@ impl<'a> Compiler<'a> {
     /// This function consumes the compiler and returns an instance of
     /// [`Rules`].
     pub fn build(self) -> Rules {
+        // Move `self` into an inner scope so that all compiler-only fields
+        // (such as `report_builder`, `symbol_table`, `global_symbols`, `ir`,
+        // `wasm_exports`, `rule_constraints`, `root_struct`, `patterns`, etc.)
+        // are dropped when `this` goes out of scope at the end of this block,
+        // before emitting and compiling the WASM module. This helps reduce
+        // peak memory usage during builds.
+        let (mut rules, wasm_mod) = {
+            let this = self;
+
+            // The structure that contains the global variables is serialized before
+            // being passed to the `Rules` struct. This is because we want `Rules`
+            // to be `Send`, so that it can be shared with scanners running in
+            // different threads. In order for `Rules` to be `Send`, it can't
+            // contain fields that are not `Send`. As `Struct` is not `Send` we
+            // can't have a `Struct` field in `Rules`, so what we have a `Vec<u8>`
+            // with a serialized version of the struct.
+            //
+            // An alternative is changing the `Rc` in some variants of `TypeValue`
+            // to `Arc`, as the root cause that prevents `Struct` from being `Send`
+            // is the use of `Rc` in `TypeValue`.
+            let serialized_globals = bincode::serde::encode_to_vec(
+                this.root_struct,
+                bincode::config::standard().with_variable_int_encoding(),
+            )
+            .expect("failed to serialize global variables");
+
+            let mut filesize_bounds = FxHashMap::default();
+            let mut header_constraints = FxHashMap::default();
+
+            for (pattern, pattern_id) in this.patterns {
+                if !pattern.filesize_bounds().unbounded() {
+                    filesize_bounds
+                        .insert(pattern_id, pattern.filesize_bounds().clone());
+                }
+                if !pattern.header_constraints().unconstrained() {
+                    header_constraints.insert(
+                        pattern_id,
+                        pattern.header_constraints().clone(),
+                    );
+                }
+            }
+
+            (
+                Rules {
+                    serialized_globals,
+                    wasm_mod: Vec::new(),
+                    compiled_wasm_mod: None,
+                    relaxed_re_syntax: this.relaxed_re_syntax,
+                    ac: AhoCorasick::default(),
+                    num_patterns: this.next_pattern_id.0 as usize,
+                    ident_pool: this.ident_pool,
+                    regex_pool: this.regex_pool,
+                    literal_pool: this.literal_pool,
+                    imported_modules: this.imported_modules,
+                    rules: this.rules,
+                    sub_patterns: this.sub_patterns,
+                    anchored_sub_patterns: this.anchored_sub_patterns,
+                    atoms: this.atoms,
+                    re_code: this.re_code,
+                    warnings: this.warnings.into(),
+                    filesize_bounds,
+                    header_constraints,
+                    regex_sets: this.regex_sets,
+                    literal_sets: this.literal_sets,
+                    fast_scan_max_matches: this.fast_scan_max_matches,
+                    rules_profiling_enabled: cfg!(feature = "rules-profiling"),
+                },
+                this.wasm_mod,
+            )
+        };
+
         // Finish building the WASM module.
-        let wasm_mod = self.wasm_mod.build().emit_wasm();
+        rules.wasm_mod = wasm_mod.build().emit_wasm();
 
         #[cfg(feature = "logging")]
         let start = Instant::now();
@@ -836,69 +924,16 @@ impl<'a> Compiler<'a> {
         // if the WASM code is invalid, which should not happen as the code is
         // emitted by YARA itself. If this ever happens is probably because
         // wrong WASM code is being emitted.
-        let compiled_wasm_mod = wasm::runtime::Module::from_binary(
-            wasm::get_engine(),
-            wasm_mod.as_slice(),
-        )
-        .expect("WASM module is not valid");
+        rules.compiled_wasm_mod = Some(
+            wasm::runtime::Module::from_binary(
+                wasm::get_engine(),
+                rules.wasm_mod.as_slice(),
+            )
+            .expect("WASM module is not valid"),
+        );
 
         #[cfg(feature = "logging")]
         info!("WASM module build time: {:?}", Instant::elapsed(&start));
-
-        // The structure that contains the global variables is serialized before
-        // being passed to the `Rules` struct. This is because we want `Rules`
-        // to be `Send`, so that it can be shared with scanners running in
-        // different threads. In order for `Rules` to be `Send`, it can't
-        // contain fields that are not `Send`. As `Struct` is not `Send` we
-        // can't have a `Struct` field in `Rules`, so what we have a `Vec<u8>`
-        // with a serialized version of the struct.
-        //
-        // An alternative is changing the `Rc` in some variants of `TypeValue`
-        // to `Arc`, as the root cause that prevents `Struct` from being `Send`
-        // is the use of `Rc` in `TypeValue`.
-        let serialized_globals = bincode::serde::encode_to_vec(
-            &self.root_struct,
-            bincode::config::standard().with_variable_int_encoding(),
-        )
-        .expect("failed to serialize global variables");
-
-        let mut filesize_bounds = FxHashMap::default();
-        let mut header_constraints = FxHashMap::default();
-
-        for (pattern, pattern_id) in self.patterns {
-            if !pattern.filesize_bounds().unbounded() {
-                filesize_bounds
-                    .insert(pattern_id, pattern.filesize_bounds().clone());
-            }
-            if !pattern.header_constraints().unconstrained() {
-                header_constraints
-                    .insert(pattern_id, pattern.header_constraints().clone());
-            }
-        }
-
-        let mut rules = Rules {
-            serialized_globals,
-            wasm_mod,
-            compiled_wasm_mod: Some(compiled_wasm_mod),
-            relaxed_re_syntax: self.relaxed_re_syntax,
-            ac: AhoCorasick::default(),
-            num_patterns: self.next_pattern_id.0 as usize,
-            ident_pool: self.ident_pool,
-            regex_pool: self.regex_pool,
-            lit_pool: self.lit_pool,
-            imported_modules: self.imported_modules,
-            rules: self.rules,
-            sub_patterns: self.sub_patterns,
-            anchored_sub_patterns: self.anchored_sub_patterns,
-            atoms: self.atoms,
-            re_code: self.re_code,
-            warnings: self.warnings.into(),
-            filesize_bounds,
-            header_constraints,
-            regex_sets: self.regex_sets,
-            fast_scan_patterns: self.fast_scan_patterns,
-            rules_profiling_enabled: cfg!(feature = "rules-profiling"),
-        };
 
         rules.build_ac_automaton();
         rules
@@ -973,7 +1008,7 @@ impl<'a> Compiler<'a> {
         self
     }
 
-    /// Tell the compiler that a YARA module is not supported.
+    /// Tell the compiler that a YARA module should be ignored.
     ///
     /// Import statements for ignored modules will be ignored without errors,
     /// but a warning will be issued. Any rule that makes use of an ignored
@@ -1286,7 +1321,7 @@ impl Compiler<'_> {
         } else {
             literal
         };
-        self.lit_pool.get_or_intern(literal_bytes)
+        self.literal_pool.get_or_intern(literal_bytes)
     }
 
     /// Takes a snapshot of the compiler's state at this moment.
@@ -1305,8 +1340,18 @@ impl Compiler<'_> {
             atoms_len: self.atoms.len(),
             re_code_len: self.re_code.len(),
             sub_patterns_len: self.sub_patterns.len(),
+            anchored_sub_patterns_len: self.anchored_sub_patterns.len(),
             symbol_table_len: self.symbol_table.len(),
-            fast_scan_patterns_len: self.fast_scan_patterns.len(),
+            fast_scan_max_matches_len: self.fast_scan_max_matches.len(),
+            rule_constraints_len: self.rule_constraints.len(),
+            global_filesize_bounds: self
+                .current_namespace
+                .global_filesize_bounds
+                .clone(),
+            global_header_constraints: self
+                .current_namespace
+                .global_header_constraints
+                .clone(),
             pattern_diagnostics_len: self.pattern_diagnostics.len(),
         }
     }
@@ -1319,10 +1364,18 @@ impl Compiler<'_> {
         self.next_pattern_id = snapshot.next_pattern_id;
         self.rules.truncate(snapshot.rules_len);
         self.sub_patterns.truncate(snapshot.sub_patterns_len);
+        self.anchored_sub_patterns
+            .truncate(snapshot.anchored_sub_patterns_len);
         self.re_code.truncate(snapshot.re_code_len);
         self.atoms.truncate(snapshot.atoms_len);
         self.symbol_table.truncate(snapshot.symbol_table_len);
-        self.fast_scan_patterns.truncate(snapshot.fast_scan_patterns_len);
+        self.fast_scan_max_matches
+            .truncate(snapshot.fast_scan_max_matches_len);
+        self.rule_constraints.truncate(snapshot.rule_constraints_len);
+        self.current_namespace.global_filesize_bounds =
+            snapshot.global_filesize_bounds;
+        self.current_namespace.global_header_constraints =
+            snapshot.global_header_constraints;
         self.pattern_diagnostics.truncate(snapshot.pattern_diagnostics_len);
 
         // Pattern IDs that are >= next_pattern_id are being discarded. Any pattern
@@ -1623,10 +1676,10 @@ impl Compiler<'_> {
             ast::MetaValue::Float((f, _)) => MetaValue::Float(*f),
             ast::MetaValue::Bool((b, _)) => MetaValue::Bool(*b),
             ast::MetaValue::String((s, _)) => {
-                MetaValue::String(self.lit_pool.get_or_intern(s))
+                MetaValue::String(self.literal_pool.get_or_intern(s))
             }
             ast::MetaValue::Bytes((s, _)) => {
-                MetaValue::Bytes(self.lit_pool.get_or_intern(s))
+                MetaValue::Bytes(self.literal_pool.get_or_intern(s))
             }
         };
 
@@ -1661,6 +1714,8 @@ impl Compiler<'_> {
             loop_iteration_multiplier: 1,
             regex_sets: &mut self.regex_sets,
             regex_pool: &mut self.regex_pool,
+            literal_sets: &mut self.literal_sets,
+            literal_pool: &mut self.literal_pool,
         };
 
         // Convert the patterns from AST to IR. This populates the
@@ -1834,13 +1889,38 @@ impl Compiler<'_> {
 
         // Analyze the condition and determine the bounds it imposes to
         // `filesize`, if any.
-        let filesize_bounds = self.ir.filesize_bounds();
+        let mut filesize_bounds = self.ir.filesize_bounds(|rule_id| {
+            self.rule_constraints.get(rule_id.0 as usize).map(|(b, _)| b)
+        });
 
         // Analyze the condition and determine if it imposes some constraint
         // to the file header (ex: `uint16(0) == 0x5a4d`).
-        let header_constraints = self.ir.header_constraints(|pat_idx| {
-            rule_patterns[pat_idx.as_usize()].pattern()
-        });
+        let mut header_constraints = self.ir.header_constraints(
+            |pat_idx| rule_patterns[pat_idx.as_usize()].pattern(),
+            |rule_id| {
+                self.rule_constraints.get(rule_id.0 as usize).map(|(_, c)| c)
+            },
+        );
+
+        let is_global = rule.flags.contains(RuleFlags::Global);
+
+        if is_global {
+            self.current_namespace
+                .global_filesize_bounds
+                .merge(&filesize_bounds);
+            self.current_namespace
+                .global_header_constraints
+                .merge(&header_constraints);
+            filesize_bounds =
+                self.current_namespace.global_filesize_bounds.clone();
+            header_constraints =
+                self.current_namespace.global_header_constraints.clone();
+        } else {
+            filesize_bounds
+                .merge(&self.current_namespace.global_filesize_bounds);
+            header_constraints
+                .merge(&self.current_namespace.global_header_constraints);
+        }
 
         // Set the bounds to all regex patterns in the rule. This must be done
         // before assigning the PatternId to each pattern, as the filesize
@@ -1875,13 +1955,15 @@ impl Compiler<'_> {
             }
         }
 
+        self.rule_constraints.push((filesize_bounds, header_constraints));
+
         let mut pattern_ids = Vec::with_capacity(rule_patterns.len());
         let mut patterns = Vec::with_capacity(rule_patterns.len());
         let mut pending_patterns = HashSet::new();
         let mut num_private_patterns = 0;
 
         for pattern in &rule_patterns {
-            // Raise error is some pattern was not used, except if the pattern
+            // Raise error if some pattern was not used, except if the pattern
             // identifier starts with underscore.
             if !pattern.in_use() && !pattern.identifier().starts_with("$_") {
                 self.restore_snapshot(snapshot);
@@ -1892,7 +1974,9 @@ impl Compiler<'_> {
                         .span_to_code_loc(pattern.identifier().span()),
                 ));
             }
+        }
 
+        for pattern in &rule_patterns {
             if pattern.pattern().flags().contains(PatternFlags::Private) {
                 num_private_patterns += 1;
             }
@@ -1904,22 +1988,20 @@ impl Compiler<'_> {
                 // Aho-Corasick automaton) the pattern again. Two patterns are
                 // considered equal if they are exactly the same, including any
                 // modifiers associated to the pattern, both are non-anchored
-                // or anchored at the same file offset, and if they have the same
-                // file size bounds.
+                // or anchored at the same file offset, if they have the same
+                // file size bounds, and if they have the same limit of matches
+                // in fast-scan mode.
                 if let Some(pattern_id) = self.patterns.get(pattern.pattern()) {
                     *pattern_id
                 } else {
                     let pattern_id = self.next_pattern_id;
                     self.next_pattern_id.incr(1);
-                    self.fast_scan_patterns.push(true);
+                    self.fast_scan_max_matches
+                        .push(pattern.max_matches_in_fast_scan());
                     pending_patterns.insert(pattern_id);
                     self.patterns.insert(pattern.pattern().clone(), pattern_id);
                     pattern_id
                 };
-
-            if !pattern.fast_scan_allowed() {
-                self.fast_scan_patterns.set(usize::from(pattern_id), false);
-            }
 
             let kind = match pattern.pattern() {
                 Pattern::Text(_) => PatternKind::Text,
@@ -1994,6 +2076,39 @@ impl Compiler<'_> {
         }
         self.current_pattern_ident = None;
 
+        // The last step is emitting the WASM code corresponding to the rule's
+        // condition. This is done after every fallible function has been called
+        // because once the code is emitted it cannot be undone, which means
+        // that if this function fails after emitting the code, some code debris
+        // will remain in the WASM module.
+        let mut ctx = EmitContext {
+            current_rule: self.rules.last_mut().unwrap(),
+            lit_pool: &mut self.literal_pool,
+            regex_pool: &mut self.regex_pool,
+            wasm_symbols: &self.wasm_symbols,
+            wasm_exports: &self.wasm_exports,
+            exception_handler_stack: Vec::new(),
+            vars_with_undef: Vec::new(),
+            lookup_list: Vec::new(),
+            emit_search_for_pattern_stack: Vec::new(),
+        };
+
+        if emit_rule_condition(
+            &mut ctx,
+            &self.ir,
+            rule_id,
+            condition,
+            &mut self.wasm_mod,
+        )
+        .is_err()
+        {
+            self.restore_snapshot(snapshot);
+            return Err(ConditionTooLarge::build(
+                &self.report_builder,
+                self.report_builder.span_to_code_loc(rule.identifier.span()),
+            ));
+        }
+
         // Create a new symbol of bool type for the rule.
         let new_symbol = Symbol::Rule {
             rule_id,
@@ -2014,43 +2129,27 @@ impl Compiler<'_> {
         // No other symbol with the same identifier should exist.
         assert!(existing_symbol.is_none());
 
-        // The last step is emitting the WASM code corresponding to the rule's
-        // condition. This is done after every fallible function has been called
-        // because once the code is emitted it cannot be undone, which means
-        // that if this function fails after emitting the code, some code debris
-        // will remain in the WASM module.
-        let mut ctx = EmitContext {
-            current_rule: self.rules.last_mut().unwrap(),
-            lit_pool: &mut self.lit_pool,
-            regex_pool: &mut self.regex_pool,
-            wasm_symbols: &self.wasm_symbols,
-            wasm_exports: &self.wasm_exports,
-            exception_handler_stack: Vec::new(),
-            lookup_list: Vec::new(),
-            emit_search_for_pattern_stack: Vec::new(),
-        };
-
-        emit_rule_condition(
-            &mut ctx,
-            &self.ir,
-            rule_id,
-            condition,
-            &mut self.wasm_mod,
-        );
-
         Ok(())
     }
 
     fn c_import(&mut self, import: &Import) -> Result<(), CompileError> {
         let module_name = import.module_name;
-        let module = crate::modules::module_by_name(module_name);
+        let ignored = self.ignored_modules.iter().any(|m| m == module_name);
+
+        // A module in the list of ignored modules is treated as if it didn't
+        // exist, even if YARA-X implements it.
+        let module = if ignored {
+            None
+        } else {
+            crate::modules::module_by_name(module_name)
+        };
 
         // Does a module with the given name actually exist? ...
         if module.is_none() {
             // The module does not exist, but it is included in the list
             // of unsupported modules. In such cases we don't raise an error,
             // only a warning.
-            return if self.ignored_modules.iter().any(|m| m == module_name) {
+            return if ignored {
                 self.warnings.add(|| {
                     warnings::IgnoredModule::build(
                         &self.report_builder,
@@ -2167,7 +2266,7 @@ impl Compiler<'_> {
         }
 
         for (main_pattern, best_atom, flags) in main_patterns {
-            let pattern_lit_id = self.lit_pool.get_or_intern(main_pattern);
+            let pattern_lit_id = self.literal_pool.get_or_intern(main_pattern);
 
             if pattern.flags.contains(PatternFlags::Xor) {
                 // When `xor` is used, `base64`, `base64wide` and `nocase` are
@@ -2229,7 +2328,7 @@ impl Compiler<'_> {
                             SubPattern::CustomBase64 {
                                 pattern: pattern_lit_id,
                                 alphabet: self
-                                    .lit_pool
+                                    .literal_pool
                                     .get_or_intern(alphabet),
                                 padding,
                             }
@@ -2268,7 +2367,7 @@ impl Compiler<'_> {
                             SubPattern::CustomBase64Wide {
                                 pattern: pattern_lit_id,
                                 alphabet: self
-                                    .lit_pool
+                                    .literal_pool
                                     .get_or_intern(alphabet),
                                 padding,
                             }
@@ -2450,7 +2549,7 @@ impl Compiler<'_> {
                 self.intern_literal(literal.0.as_bytes(), wide);
 
             let best_atom = best_atom_in_bytes(
-                self.lit_pool.get_bytes(pattern_lit_id).unwrap(),
+                self.literal_pool.get_bytes(pattern_lit_id).unwrap(),
             );
 
             let flags =
@@ -2827,7 +2926,7 @@ impl Compiler<'_> {
             pattern_id,
             SubPattern::LiteralChainHead { pattern: pattern_lit_id, flags },
             extract_atoms(
-                self.lit_pool.get_bytes(pattern_lit_id).unwrap(),
+                self.literal_pool.get_bytes(pattern_lit_id).unwrap(),
                 flags,
             ),
             SubPatternAtom::from_atom,
@@ -2855,7 +2954,7 @@ impl Compiler<'_> {
                 flags,
             },
             extract_atoms(
-                self.lit_pool.get_bytes(pattern_lit_id).unwrap(),
+                self.literal_pool.get_bytes(pattern_lit_id).unwrap(),
                 flags,
             ),
             SubPatternAtom::from_atom,
@@ -3056,6 +3155,36 @@ impl From<RegexSetId> for usize {
 impl From<RegexSetId> for i32 {
     #[inline]
     fn from(value: RegexSetId) -> Self {
+        value.0
+    }
+}
+
+/// ID associated to each grouped `LiteralSet`.
+///
+/// When compiling rules, identical string expressions are frequently compared
+/// against multiple distinct string literals within an `or` condition. The
+/// compiler groups these literals into a `LiteralSetId` so the target string
+/// expression is evaluated once and compared against the set.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub(crate) struct LiteralSetId(i32);
+
+impl From<i32> for LiteralSetId {
+    #[inline]
+    fn from(value: i32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<LiteralSetId> for usize {
+    #[inline]
+    fn from(value: LiteralSetId) -> Self {
+        value.0 as usize
+    }
+}
+
+impl From<LiteralSetId> for i32 {
+    #[inline]
+    fn from(value: LiteralSetId) -> Self {
         value.0
     }
 }
@@ -3278,8 +3407,12 @@ struct Snapshot {
     atoms_len: usize,
     re_code_len: usize,
     sub_patterns_len: usize,
+    anchored_sub_patterns_len: usize,
     symbol_table_len: usize,
-    fast_scan_patterns_len: usize,
+    fast_scan_max_matches_len: usize,
+    rule_constraints_len: usize,
+    global_filesize_bounds: FilesizeBounds,
+    global_header_constraints: HeaderConstraint,
     pattern_diagnostics_len: usize,
 }
 

@@ -280,9 +280,19 @@ fn generate_module_docs(
 
     for (msg_name, field_number, comments) in docs {
         let escaped_comments = comments.replace("\"", "\\\"");
+        // Testing proto modules don't end up in release builds.
+        let cfg_attr = if msg_name.starts_with("test_proto") {
+            format!(
+                r#"#[cfg(feature = "{}-module")]
+    "#,
+                msg_name.split_once('.').unwrap().0
+            )
+        } else {
+            String::new()
+        };
         writeln!(
             field_docs_rs,
-            r#"    ("{}", {}, "{}"),"#,
+            r#"{cfg_attr}    ("{}", {}, "{}"),"#,
             msg_name, field_number, escaped_comments
         )
         .unwrap();
@@ -388,6 +398,28 @@ fn generate_proto_code() {
     // Generate .rs files for .proto files in src/modules/protos
     proto_compiler.run_from_script();
 
+    let out_dir = env::var("OUT_DIR").unwrap();
+
+    // The test protos are compiled only when the corresponding feature is
+    // enabled, keeping the test modules out of release builds. The `cfg`
+    // attributes are added here (instead of skipping the generation of the
+    // files) so the generated code doesn't depend on the enabled features.
+    let out_mod_rs_path =
+        PathBuf::from(&out_dir).join("protos").join("mod.rs");
+    let out_mod_rs = fs::read_to_string(&out_mod_rs_path).unwrap();
+    let out_mod_rs = out_mod_rs
+        .replace(
+            "pub mod test_proto2;",
+            r#"#[cfg(feature = "test_proto2-module")]
+pub mod test_proto2;"#,
+        )
+        .replace(
+            "pub mod test_proto3;",
+            r#"#[cfg(feature = "test_proto3-module")]
+pub mod test_proto3;"#,
+        );
+    fs::write(&out_mod_rs_path, out_mod_rs).unwrap();
+
     // Decide whether `modules.rs` and the content of the `protos/generated`
     // directory should be re-generated. By default, they will be re-generated.
     let mut regenerate = true;
@@ -415,7 +447,6 @@ fn generate_proto_code() {
         #[cfg(feature = "generate-module-docs")]
         generate_module_docs(&proto_files, &modules);
 
-        let out_dir = env::var("OUT_DIR").unwrap();
         let src_dir = PathBuf::from("src/modules/protos/generated");
         let _ = fs::create_dir_all(&src_dir);
 
@@ -431,7 +462,125 @@ fn generate_proto_code() {
     }
 }
 
+/// Emits `cargo:rustc-link-search=native=<dir>` flags so the linker can find
+/// `libmagic` when the `magic-module` feature is enabled.
+///
+/// Why this is needed:
+/// `magic` 0.16.7 depends on `magic-sys` 0.3.0, whose `build.rs` does not use
+/// `pkg-config` or probe non-standard library locations. Unless `MAGIC_DIR` or
+/// `vcpkg` is configured, `magic-sys` only emits `cargo:rustc-link-lib=magic`
+/// without any `-L` search path. On Linux `libmagic.so` typically resides in a
+/// default system path (`/usr/lib/...`), but macOS does not ship `libmagic`
+/// and `ld` does not search Homebrew or MacPorts prefixes by default, failing
+/// with `ld: library 'magic' not found`. Setting `MAGIC_DIR` on macOS is also
+/// broken in `magic-sys` 0.3.0 because it looks for `libmagic.so` instead of
+/// `libmagic.dylib`, silently falling back to `libmagic.a` without linking its
+/// transitive C dependencies (`lzma`, `bz2`, `z`).
+///
+/// Why this lives in `lib/build.rs`:
+/// Cargo propagates `cargo:rustc-link-search` from `rlib` crates (`yara-x`) to
+/// all downstream link targets (`yara-x-py`, `yara-x-capi`, `yr`, and test
+/// binaries), where `rustc` combines our `-L native=<dir>` flag with the
+/// `-lmagic` requirement recorded in `magic-sys`'s metadata.
+#[cfg(feature = "magic-module")]
+fn configure_magic_link_search() {
+    use std::env;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    println!("cargo:rerun-if-env-changed=MAGIC_DIR");
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR");
+    println!("cargo:rerun-if-env-changed=HOMEBREW_PREFIX");
+
+    // `magic-sys` handles `MAGIC_DIR` and `vcpkg` directly; defer to it when
+    // either environment variable is explicitly set by the user.
+    if env::var_os("MAGIC_DIR").is_some()
+        || env::var_os("VCPKG_ROOT").is_some()
+    {
+        return;
+    }
+
+    // Avoid querying the host's `pkg-config` during cross-compilation unless
+    // `pkg-config` has been explicitly configured for cross-builds; otherwise
+    // host library paths could leak into the target linker invocation.
+    let is_cross = env::var("HOST") != env::var("TARGET");
+    let allow_pkg_config = !is_cross
+        || env::var_os("PKG_CONFIG_ALLOW_CROSS").is_some()
+        || env::var_os("PKG_CONFIG_LIBDIR").is_some()
+        || env::var_os("PKG_CONFIG_SYSROOT_DIR").is_some();
+
+    // First try `pkg-config` to discover non-default library directories (e.g.
+    // custom prefixes, Nix, or Homebrew/MacPorts when `pkgconf` is installed).
+    if allow_pkg_config {
+        let pkg_config =
+            env::var_os("PKG_CONFIG").unwrap_or_else(|| "pkg-config".into());
+
+        if let Ok(output) = Command::new(pkg_config)
+            .args(["--libs-only-L", "libmagic"])
+            .output()
+            && output.status.success()
+        {
+            let mut found = false;
+            for flag in
+                String::from_utf8_lossy(&output.stdout).split_whitespace()
+            {
+                if let Some(dir) = flag.strip_prefix("-L") {
+                    println!("cargo:rustc-link-search=native={dir}");
+                    found = true;
+                }
+            }
+            if found {
+                return;
+            }
+        }
+    }
+
+    // `brew install libmagic` on macOS does not install `pkg-config` by
+    // default, so `pkg-config` above may not be present even when `libmagic`
+    // is installed. Probe standard Homebrew and MacPorts locations as a
+    // fallback.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let mut candidates = Vec::new();
+
+        if let Some(prefix) = env::var_os("HOMEBREW_PREFIX") {
+            let prefix = PathBuf::from(prefix);
+            candidates.push(prefix.join("opt/libmagic/lib"));
+            candidates.push(prefix.join("lib"));
+        }
+
+        // Apple Silicon Macs often have both arm64 (`/opt/homebrew`) and
+        // Intel/Rosetta (`/usr/local`) Homebrew installations side-by-side, so
+        // check the prefix matching the target architecture first.
+        if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+            candidates.push(PathBuf::from("/usr/local/opt/libmagic/lib"));
+            candidates.push(PathBuf::from("/opt/homebrew/opt/libmagic/lib"));
+        } else {
+            candidates.push(PathBuf::from("/opt/homebrew/opt/libmagic/lib"));
+            candidates.push(PathBuf::from("/usr/local/opt/libmagic/lib"));
+        }
+
+        // MacPorts default library path.
+        candidates.push(PathBuf::from("/opt/local/lib"));
+
+        for dir in candidates {
+            if dir.join("libmagic.dylib").exists()
+                || dir.join("libmagic.1.dylib").exists()
+            {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+                break;
+            }
+        }
+    }
+}
+
 fn main() {
     #[cfg(feature = "generate-proto-code")]
     generate_proto_code();
+
+    #[cfg(feature = "magic-module")]
+    configure_magic_link_search();
 }

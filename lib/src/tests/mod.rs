@@ -281,6 +281,17 @@ fn string_operations() {
     condition_true!(r#""foo" istartswith "Fo""#);
     condition_true!(r#""foo" iendswith "OO""#);
 
+    // Some non-ASCII characters are lowercased to ASCII (U+212A KELVIN SIGN
+    // -> 'k', 'İ' -> "i\u{307}"), or change their length in bytes ('Ⱥ' -> 'ⱥ'
+    // goes from 2 to 3 bytes).
+    condition_true!(r#""\xE2\x84\xAAelvin" istartswith "kel""#);
+    condition_true!(r#""İstanbul" istartswith "i""#);
+    condition_true!(r#""Ⱥ" istartswith "ⱥ""#);
+    condition_true!(r#""ABC\xE2\x84\xAA" iendswith "k""#);
+    condition_true!(r#""x\xE2\x84\xAAx" icontains "k""#);
+    condition_true!(r#""\xE2\x84\xAA" iequals "k""#);
+    condition_true!(r#""Ⱥ" iequals "ⱥ""#);
+
     condition_false!(r#""foo" contains "OO""#);
     condition_false!(r#""foo" startswith "Fo""#);
     condition_false!(r#""foo" endswith "OO""#);
@@ -445,6 +456,325 @@ fn intxx() {
 }
 
 #[test]
+fn unsigned_integers() {
+    // Literals that don't fit in an i64 are unsigned.
+    condition_true!("0xFFFFFFFFFFFFFFFF == 18446744073709551615");
+    condition_true!("0x8000000000000000 == 9223372036854775808");
+    condition_true!("0o1777777777777777777777 == 0xFFFFFFFFFFFFFFFF");
+
+    // The minimum i64 can be written as a literal.
+    condition_true!("-9223372036854775808 == -0x7FFFFFFFFFFFFFFF - 1");
+    condition_true!("-9223372036854775808 < 0");
+
+    // Comparisons between unsigned integers.
+    condition_true!("0xFFFFFFFFFFFFFFFF > 0x8000000000000000");
+    condition_true!("0x8000000000000000 < 0xFFFFFFFFFFFFFFFF");
+    condition_true!("0xFFFFFFFFFFFFFFFF >= 0xFFFFFFFFFFFFFFFF");
+    condition_true!("0x8000000000000000 <= 0xFFFFFFFFFFFFFFFF");
+
+    // Comparisons between unsigned and signed integers are mathematically
+    // correct, unsigned integers are greater than any negative integer.
+    condition_true!("0xFFFFFFFFFFFFFFFF > 0x7FFFFFFFFFFFFFFF");
+    condition_true!("0x8000000000000000 > 0");
+    condition_true!("0xFFFFFFFFFFFFFFFF > -1");
+    condition_true!("0xFFFFFFFFFFFFFFFF >= -1");
+    condition_true!("0xFFFFFFFFFFFFFFFF != -1");
+    condition_true!("-1 < 0xFFFFFFFFFFFFFFFF");
+    condition_true!("-1 <= 0xFFFFFFFFFFFFFFFF");
+    condition_true!("-1 != 0xFFFFFFFFFFFFFFFF");
+    condition_false!("0xFFFFFFFFFFFFFFFF == -1");
+    condition_false!("0xFFFFFFFFFFFFFFFF < -1");
+    condition_false!("0xFFFFFFFFFFFFFFFF <= -1");
+    condition_false!("-1 == 0xFFFFFFFFFFFFFFFF");
+    condition_false!("-1 > 0xFFFFFFFFFFFFFFFF");
+    condition_false!("-1 >= 0xFFFFFFFFFFFFFFFF");
+
+    // Comparisons between unsigned integers and floats.
+    condition_true!("0xFFFFFFFFFFFFFFFF > 1.0");
+    condition_true!("0x8000000000000000 == 9223372036854775808.0");
+
+    // Constant folding.
+    condition_true!("0xFFFFFFFFFFFFFFFF - 1 == 0xFFFFFFFFFFFFFFFE");
+    condition_true!("0x8000000000000000 - 1 == 0x7FFFFFFFFFFFFFFF");
+    condition_true!(
+        "0x8000000000000000 + 0x7FFFFFFFFFFFFFFF == 0xFFFFFFFFFFFFFFFF"
+    );
+    condition_true!("0xFFFFFFFFFFFFFFFF * 1 == 0xFFFFFFFFFFFFFFFF");
+    condition_true!("0xFFFFFFFFFFFFFFFF & 0xFF == 0xFF");
+    condition_true!("0xFFFFFFFFFFFFFFFF ^ 0xFF == 0xFFFFFFFFFFFFFF00");
+    condition_true!("0x8000000000000000 | 1 == 0x8000000000000001");
+    condition_true!("0xFFFFFFFFFFFFFFFF >> 60 == 15");
+    condition_true!("0xFFFFFFFFFFFFFFFF << 4 == 0xFFFFFFFFFFFFFFF0");
+    condition_true!("0x8000000000000000 + 0.0 == 9223372036854775808.0");
+    condition_true!("9007199254740993 + 0 == 9007199254740993");
+
+    // Division and modulus are unsigned.
+    condition_true!(r"0xFFFFFFFFFFFFFFFF \ 2 == 0x7FFFFFFFFFFFFFFF");
+    condition_true!("0xFFFFFFFFFFFFFFFF % 10 == 5");
+    condition_true!(r"0x8000000000000000 \ 2.0 == 4611686018427387904.0");
+    condition_true!(r"9223372036854775808.0 \ 0x8000000000000000 == 1.0");
+    condition_true!(r"-1 \ 2.0 == -0.5");
+
+    // When signed and unsigned integers are mixed, the result is unsigned,
+    // regardless of the values of the signed integers. Negative integers are
+    // interpreted as unsigned, so they wrap around.
+    condition_true!(
+        r"(4 \ 2) * (0xFFFFFFFFFFFFFFFF \ 2) == 0xFFFFFFFFFFFFFFFE"
+    );
+    condition_true!(
+        r"(5 % 3) * (0xFFFFFFFFFFFFFFFF \ 2) == 0xFFFFFFFFFFFFFFFE"
+    );
+    condition_true!(
+        r"(5 - 3) * (0xFFFFFFFFFFFFFFFF \ 2) == 0xFFFFFFFFFFFFFFFE"
+    );
+    condition_true!("0xFFFFFFFFFFFFFFFF + (-1) == 0xFFFFFFFFFFFFFFFE");
+    condition_true!("(-1) + 0xFFFFFFFFFFFFFFFF == 0xFFFFFFFFFFFFFFFE");
+    condition_true!("((-1) | 0x8000000000000000) == 0xFFFFFFFFFFFFFFFF");
+    condition_true!(r"0xFFFFFFFFFFFFFFFF \ (-2) == 1");
+    condition_true!("0xFFFFFFFFFFFFFFFF % (-2) == 1");
+
+    // Same operations but with values not known at compile time.
+    condition_true!(
+        "for all x in (0xFFFFFFFFFFFFFFFF) : (
+            x > 0 and x > -1 and x >= -1 and x != -1 and not x == -1 and
+            -1 < x and -1 <= x and -1 != x and not -1 == x and
+            x > 0x7FFFFFFFFFFFFFFF and x == 0xFFFFFFFFFFFFFFFF
+        )"
+    );
+    condition_true!(
+        r"for all x in (0xFFFFFFFFFFFFFFFF) : (
+            x \ 2 == 0x7FFFFFFFFFFFFFFF and
+            x \ 1.0 == 18446744073709551615.0 and
+            18446744073709551615.0 \ x == 1.0 and
+            x % 10 == 5 and
+            x >> 60 == 15 and
+            x << 4 == 0xFFFFFFFFFFFFFFF0 and
+            x - 1 == 0xFFFFFFFFFFFFFFFE and
+            x + 1 == 0 and
+            x * 1.0 == 18446744073709551615.0 and
+            x > 1.0
+        )"
+    );
+    condition_true!(
+        r"for all x in (-1) : (
+            x \ 2.0 == -0.5 and
+            2.0 \ x == -2.0
+        )"
+    );
+
+    // Comparisons between unsigned and signed values not known at compile
+    // time.
+    condition_true!(
+        "for all x in (0xFFFFFFFFFFFFFFFF) : (
+            for all y in (-1) : (
+                x > y and x >= y and x != y and not x == y and
+                y < x and y <= x and y != x and not y == x
+            )
+        )"
+    );
+    condition_true!(
+        "for all x in (0x8000000000000000) : (
+            for all y in (1) : (x > y and y < x)
+        )"
+    );
+
+    // When an unsigned integer is mixed with a signed integer the result is
+    // unsigned, even if the value of the signed integer is not known at
+    // compile time, or is negative.
+    condition_true!(
+        "for all x in (0xFFFFFFFFFFFFFFFF) : (
+            for all y in (1) : (x - y == 0xFFFFFFFFFFFFFFFE and x - y > 0)
+        )"
+    );
+    condition_true!(
+        "for all x in (0xFFFFFFFFFFFFFFFF) : (
+            for all y in (-1) : (
+                x + y == 0xFFFFFFFFFFFFFFFE and x * y == 1 and x % y == 0
+            )
+        )"
+    );
+    condition_true!(
+        r"for all i in (2..2) : (
+            i * (0xFFFFFFFFFFFFFFFF \ 2) == 0xFFFFFFFFFFFFFFFE
+        )"
+    );
+
+    // Shifts take the signedness of the left operand.
+    condition_true!(
+        "for all x in (0xFFFFFFFFFFFFFFFF) : (
+            for all y in (60) : (x >> y == 15)
+        )"
+    );
+    condition_true!(
+        "for all x in (-1) : (
+            for all y in (0x8000000000000000) : (x >> y == 0)
+        )"
+    );
+
+    // Tuples that mix unsigned and signed integers are unsigned.
+    condition_true!("for all x in (1, 0xFFFFFFFFFFFFFFFF) : (x > 0)");
+    condition_true!(
+        "for all x in (-5, 0xFFFFFFFFFFFFFFFF) : (x > 0xFFFFFFFFFFFFFFFA)"
+    );
+
+    // Unary minus produces a signed integer, while the bitwise not of an
+    // unsigned integer is unsigned. Negating an unsigned integer greater
+    // than 0x7FFFFFFFFFFFFFFF wraps around at runtime, but negating a
+    // constant that produces a result that doesn't fit in a signed integer
+    // is an error (e.g: `-(0xFFFFFFFFFFFFFFFF)`).
+    condition_true!("for all x in (0xFFFFFFFFFFFFFFFF) : (-x == 1)");
+    condition_true!("-(0x8000000000000000) == -9223372036854775808");
+    condition_true!("~0xFFFFFFFFFFFFFFFF == 0");
+    condition_true!("~0x7FFFFFFFFFFFFFFF == -9223372036854775808");
+
+    // Dividing i64::MIN by -1 overflows signed 64-bit integer and evaluates
+    // to undefined instead of trapping at runtime.
+    condition_false!(r"-9223372036854775808 \ -1 == 0");
+    condition_true!(r"not defined (-9223372036854775808 \ -1)");
+    condition_true!("-9223372036854775808 % -1 == 0");
+
+    // Dividing an unsigned integer by -1 is an unsigned division, where -1
+    // is interpreted as 0xFFFFFFFFFFFFFFFF.
+    condition_true!(r"0x8000000000000000 \ -1 == 0");
+    condition_true!(r"0xFFFFFFFFFFFFFFFF \ -1 == 1");
+}
+
+#[test]
+fn int64xx() {
+    let data = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ];
+
+    condition_true!("int64(0) == 0x0807060504030201", &data);
+    condition_true!("int64(1) == 0x0908070605040302", &data);
+    condition_true!("int64(10) == -1", &data);
+    condition_true!("int64(12) == -1", &data);
+    condition_true!(r"int64(10) \ 2.0 == -0.5", &data);
+    // Bytes 04 05 06 07 08 09 0A FF, the most significant byte is 0xFF.
+    condition_true!("int64(3) < 0", &data);
+    condition_true!("int64(3) == -0x00f5f6f7f8f9fafc", &data);
+
+    condition_true!("int64be(0) == 0x0102030405060708", &data);
+    condition_true!("int64be(1) == 0x0203040506070809", &data);
+    condition_true!("int64be(10) == -1", &data);
+    condition_true!("int64be(3) == 0x0405060708090aff", &data);
+
+    // Dividing i64::MIN by -1 returns undefined.
+    condition_true!(
+        r"not defined (int64(0) \ -1)",
+        &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80]
+    );
+
+    // Reading past the end of the data, or at a negative offset, returns
+    // an undefined value.
+    condition_false!("int64(13) == 0", &data);
+    condition_false!("int64(13) != 0", &data);
+    condition_false!("int64be(13) == 0", &data);
+    condition_false!("int64be(13) != 0", &data);
+    condition_false!("int64(-1) == 0", &data);
+    condition_false!("int64(-1) != 0", &data);
+}
+
+#[test]
+fn uint64xx() {
+    let data = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ];
+
+    condition_true!("uint64(0) == 0x0807060504030201", &data);
+    condition_true!("uint64(1) == 0x0908070605040302", &data);
+    condition_true!("uint64(10) == 0xFFFFFFFFFFFFFFFF", &data);
+    condition_true!("uint64(12) == 18446744073709551615", &data);
+
+    // Bytes 04 05 06 07 08 09 0A FF, the most significant byte is 0xFF, but
+    // the result is unsigned.
+    condition_true!("uint64(3) > 0", &data);
+    condition_true!("uint64(3) == 0xFF0A090807060504", &data);
+    condition_true!("uint64(3) > 0x7FFFFFFFFFFFFFFF", &data);
+    condition_true!("uint64(10) > -1", &data);
+    condition_true!("uint64(10) >= -1", &data);
+    condition_false!("uint64(10) == -1", &data);
+    // `uint64` and `int64` read the same bits, but the values are different.
+    condition_false!("uint64(10) == int64(10)", &data);
+    condition_true!("uint64(10) > int64(10)", &data);
+    condition_true!("uint64(0) == int64(0)", &data);
+
+    // Arithmetic with unsigned results.
+    condition_true!(r"uint64(10) \ uint8(0) == 0xFFFFFFFFFFFFFFFF", &data);
+    condition_true!(r"uint64(10) \ 2 == 0x7FFFFFFFFFFFFFFF", &data);
+    condition_true!(r"uint64(10) \ uint8(1) == 0x7FFFFFFFFFFFFFFF", &data);
+    condition_true!(r"uint64(10) % uint8(9) == 5", &data);
+    condition_true!("uint64(10) + uint8(0) == 0", &data);
+    condition_true!("uint64(10) - uint16(0) == 0xFFFFFFFFFFFFFDFE", &data);
+    condition_true!("uint64(10) - uint32(0) == 0xFFFFFFFFFBFCFDFE", &data);
+    condition_true!("uint8(0) - 2 == -1", &data);
+    condition_true!("uint16(0) - 0x0202 == -1", &data);
+    condition_true!("uint32(0) - 0x04030202 == -1", &data);
+    condition_true!("uint64(10) % 10 == 5", &data);
+    condition_true!("uint64(10) >> 60 == 15", &data);
+    condition_true!("uint64(10) + 1 == 0", &data);
+    condition_true!("uint64(10) - 1 == 0xFFFFFFFFFFFFFFFE", &data);
+    condition_true!("uint64(10) == 18446744073709551615.0", &data);
+    condition_true!(r"uint64(10) \ 1.0 == 18446744073709551615.0", &data);
+
+    condition_true!("uint64be(0) == 0x0102030405060708", &data);
+    condition_true!("uint64be(1) == 0x0203040506070809", &data);
+    condition_true!("uint64be(10) == 0xFFFFFFFFFFFFFFFF", &data);
+    condition_true!("uint64be(3) == 0x0405060708090aff", &data);
+    condition_true!("uint64be(5) == 0x060708090AFFFFFF", &data);
+
+    // Reading past the end of the data, or at a negative offset, returns
+    // an undefined value.
+    condition_false!("uint64(13) == 0", &data);
+    condition_false!("uint64(13) != 0", &data);
+    condition_false!("uint64be(13) == 0", &data);
+    condition_false!("uint64be(13) != 0", &data);
+    condition_false!("uint64(-1) == 0", &data);
+    condition_false!("uint64(-1) != 0", &data);
+    condition_false!("uint8(0x7FFFFFFFFFFFFFFF) == 0", &data);
+    condition_false!("float64(0x7FFFFFFFFFFFFFFF) == 0.0", &data);
+
+    // Using `uint64` (> i64::MAX) or negative `int8` at runtime in
+    // quantifiers, range bounds, and pattern anchors. Unsigned values greater
+    // than i64::MAX behave like negative numbers in all these cases, which is
+    // usually the intention when they are the result of a subtraction that
+    // wrapped around.
+    condition_false!("uint64(10) of (true)", &data);
+    condition_false!("int8(10) of (true)", &data);
+    condition_false!("for uint64(10) i in (0..1) : (true)", &data);
+    condition_false!("for int8(10) i in (0..1) : (true)", &data);
+    condition_false!("for any i in (0..uint64(10)) : (true)", &data);
+    condition_false!("for any i in (5..uint64(10)) : (true)", &data);
+    condition_false!("for any i in (uint64(10)..5) : (true)", &data);
+
+    rule_false!(
+        r#"
+        rule test {
+            strings:
+                $a = { 01 02 }
+            condition:
+                uint64(10) of ($a) or int8(10) of ($a)
+        }
+        "#,
+        &data
+    );
+
+    rule_false!(
+        r#"
+        rule test {
+            strings:
+                $a = { 01 02 }
+            condition:
+                $a at uint64(10) or $a in (0..uint64(10)) or #a in (0..uint64(10)) > 0
+        }
+        "#,
+        &data
+    );
+}
+
+#[test]
 fn floatxx() {
     condition_true!("float32(0) == 1.0", &[0x00, 0x00, 0x80, 0x3f]);
     condition_true!("float32be(0) == 1.0", &[0x3f, 0x80, 0x00, 0x00]);
@@ -522,6 +852,42 @@ fn for_in() {
     condition_true!("for 10% i in (0..9) : ( i == 0 )");
     condition_false!("for 11% i in (0..9) : ( i == 0 )");
 
+    // Percentages computed at runtime can be outside the range [0, 100], and
+    // `n * percentage / 100` may not fit in an i64. This must not trap. Such
+    // percentages can't be satisfied, as the number of iterations that must
+    // be true is either negative or larger than the number of iterations.
+    condition_false!(
+        "for int64(0) % i in (0..1000) : ( true )",
+        &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80]
+    );
+    condition_false!(
+        "for int64(0) % i in (0..1000) : ( true )",
+        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]
+    );
+    condition_false!(
+        "for uint64(0) % i in (0..1000) : ( true )",
+        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+    );
+
+    // Unsigned percentages are never negative. If `uint64(0)` was converted
+    // to float as a signed integer it would be -1, `n * -1 / 100` would be
+    // rounded to 0, and the loop would behave as `for none ...`.
+    condition_false!(
+        "for uint64(0) % i in (0..9) : ( false )",
+        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+    );
+
+    // Negative percentages can't be satisfied either, even when
+    // `n * percentage / 100` is rounded to 0, which would mean `none`.
+    condition_false!("for int8(0) % i in (0..9) : ( false )", &[0xFF]);
+    condition_false!("for int8(0) % i in (0..9) : ( true )", &[0xFF]);
+    condition_false!("for int8(0) % i in (0..1000) : ( true )", &[0xFF]);
+
+    // Negative quantifiers computed at runtime can't be satisfied.
+    condition_false!("for int8(0) i in (0..9) : ( true )", &[0xFF]);
+    condition_false!("for int8(0) i in (0..9) : ( false )", &[0xFF]);
+    condition_false!("int8(0) of (true, false)", &[0xFF]);
+
     // If the range's lower bound is greater than the upper bound
     // the `for` loop is always false. The outer loop is only for
     // being able to write a loop with a range (i+1..i) where
@@ -557,6 +923,66 @@ fn for_in() {
             for none j in (i + 1..i) : (
                 false
             )
+        )"
+    );
+
+    // Negative lower bounds known at compile time are rejected by the
+    // compiler, but the lower bound can be negative at runtime (e.g: when it
+    // is computed from `filesize` or a pattern offset). In such cases the
+    // loop iterates over the negative values as usual.
+    condition_true!(
+        "for any x in (-3) : ( for any i in (x..0) : ( i == -3 ) )"
+    );
+    condition_true!("for any x in (-3) : ( for 4 i in (x..0) : ( i <= 0 ) )");
+    condition_true!(
+        "for any i in (filesize - 10..filesize) : ( uint8(i) == 0x41 )",
+        b"A"
+    );
+
+    // A negative (signed) lower bound with an unsigned upper bound that fits
+    // in an `i64`.
+    condition_true!(
+        "for any x in (-2) : ( for 4 i in (x..uint64(0)) : ( true ) )",
+        &[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
+
+    // The range is empty when upper_bound < lower_bound, even if computing
+    // `upper_bound - lower_bound + 1` wraps around into a positive number.
+    condition_false!(
+        "for any x in (0x7FFFFFFFFFFFFFFF) : (
+            for any y in (-9223372036854775808) : (
+                for any i in (x..y) : ( true )
+            )
+        )"
+    );
+
+    // Unsigned bounds greater than i64::MAX can't be represented by the loop
+    // variable, so the range is empty. Usually, these bounds are the result of
+    // an unsigned subtraction that wrapped around, like `x - 1` when `x` is 0.
+    condition_false!(
+        "for any x in (0xFFFFFFFFFFFFFFFE) : (
+            for any y in (0xFFFFFFFFFFFFFFFF) : (
+                for any i in (x..y) : ( true )
+            )
+        )"
+    );
+    condition_false!(
+        "for any x in (0xFFFFFFFFFFFFFFFF) : (
+            for any i in (0..x) : ( true )
+        )"
+    );
+    condition_false!(
+        "for any x in (0, 0xFFFFFFFFFFFFFFFF) : (
+            for any i in (0..x - 1) : ( true )
+        )"
+    );
+
+    // Ranges with more than i64::MAX items are iterated, even though the
+    // number of items doesn't fit in an `i64`.
+    condition_true!("for any i in (0..0x7FFFFFFFFFFFFFFF) : ( i == 1 )");
+    condition_true!(
+        "for any x in (-9223372036854775808) : (
+            for any i in (x..0x7FFFFFFFFFFFFFFF) : ( i == x + 1 )
         )"
     );
 
@@ -776,6 +1202,14 @@ fn with() {
            )
         )
         "#
+    );
+
+    condition_true!(r#"with re = /foo.*bar/ : ("foo123bar" matches re)"#);
+    condition_false!(r#"with re = /foo.*bar/ : ("foo123baz" matches re)"#);
+    condition_true!(r#"with re = /foobar/i : ("xxFOOBARxx" matches re)"#);
+    condition_true!(r#"with r1 = /foo.*1/, r2 = r1 : ("foo_1" matches r2)"#);
+    condition_true!(
+        r#"with r1 = /foo.*1/, r2 = /bar.*2/ : ("bar_2" matches r1 or "bar_2" matches r2)"#
     );
 }
 
@@ -1491,6 +1925,8 @@ fn regexp_patterns_2() {
     pattern_match!(r#"/abc.{0,3}ddd/s"#, b"abcdddddd", b"abcdddddd");
     pattern_false!(r#"/abc.{1,3}def/s"#, b"abcxxxxdef");
     pattern_false!(r#"/ab.{1,3}cdef/s"#, b"abxxxxcdef");
+    pattern_match!(r"/ab(k{0}x)+c/", b"abxc", b"abxc");
+    pattern_match!(r"/ab(k{0}x)+c/", b"abxxc", b"abxxc");
     pattern_match!(r#"/abc.*ddd/s"#, b"abcdddddd", b"abcdddddd");
     pattern_match!(r#"/abc.*?ddd/s"#, b"abcdddddd", b"abcddd");
     pattern_match!(r#"/abc.*ddd/s"#, b"abcabcdddddd", b"abcabcdddddd");
@@ -1711,6 +2147,10 @@ fn regexp_patterns_4() {
     pattern_false!(r#"/(bc+d$|ef*g.|h?i(j|k))/"#, b"effg");
     pattern_false!(r#"/(bc+d$|ef*g.|h?i(j|k))/"#, b"bcdd");
     pattern_match!(r#"/(bc+d$|ef*g.|h?i(j|k))/"#, b"reffgz", b"effgz");
+    pattern_match!(r#"/abc(\s|$)+?/"#, b"abc", b"abc");
+    pattern_match!(r#"/abc(\s|$)+/"#, b"abc", b"abc");
+    pattern_match!(r#"/(\s|^)+?abc/"#, b"abc", b"abc");
+    pattern_match!(r#"/(\s|^)+abc/"#, b"abc", b"abc");
 }
 
 #[test]
@@ -1748,6 +2188,19 @@ fn regexp_patterns_5() {
     pattern_match!(r"/abc\b{end}/", b"abc", b"abc");
     pattern_match!(r"/\b{start}abc/", b" abc", b"abc");
     pattern_match!(r"/abc\b{end}/", b"abc ", b"abc");
+    pattern_false!(r"/\b{end}abcd/", b"abcd");
+    pattern_match!(r"/\b{start-half}abc/", b"abc", b"abc");
+    pattern_match!(r"/\b{start-half}abc/", b" abc", b"abc");
+    pattern_match!(r"/\b{start-half} abc/", b"  abc", b" abc");
+    pattern_false!(r"/\b{start-half}abc/", b"1abc");
+    pattern_false!(r"/abc\b{start-half}/", b"abc");
+    pattern_match!(r"/abc \b{start-half}/", b"abc 1", b"abc ");
+    pattern_match!(r"/abc\b{end-half}/", b"abc", b"abc");
+    pattern_match!(r"/abc\b{end-half}/", b"abc ", b"abc");
+    pattern_match!(r"/abc \b{end-half}/", b"abc  ", b"abc ");
+    pattern_false!(r"/abc\b{end-half}/", b"abc1");
+    pattern_false!(r"/\b{end-half}abc/", b"abc");
+    pattern_match!(r"/\b{end-half} abc/", b" abc", b" abc");
     pattern_false!(r"/\<abc/", b" abc");
     pattern_false!(r"/abc\>/", b"abc ");
     pattern_false!(r"/\<abc/", b"1abc");
@@ -1794,12 +2247,28 @@ fn regexp_patterns_5() {
     pattern_match!(r"/^abc\b{end} xyz$/", b"abc xyz", b"abc xyz");
     pattern_false!(r"/^abc \b{end}xyz$/", b"abc xyz");
 
+    pattern_match!(r"/^abc \b{start-half}xyz$/", b"abc xyz", b"abc xyz");
+    pattern_match!(r"/^abc \b{start-half} xyz$/", b"abc  xyz", b"abc  xyz");
+    pattern_false!(r"/^abc\b{start-half} xyz$/", b"abc xyz");
+
+    pattern_match!(r"/^abc\b{end-half} xyz$/", b"abc xyz", b"abc xyz");
+    pattern_match!(r"/^abc \b{end-half} xyz$/", b"abc  xyz", b"abc  xyz");
+    pattern_false!(r"/^abc \b{end-half}xyz$/", b"abc xyz");
+
     pattern_match!(r"/^abc\Bxyz$/", b"abcxyz", b"abcxyz");
 
     // Here the Unicode mode is enabled only for "abc", for the rest of the
     // regexp Unicode is disabled
     pattern_match!(r"/(?u)^abc(?-u)\b xyz$/", b"abc xyz", b"abc xyz");
     pattern_match!(r"/^((?u)abc)\b xyz$/", b"abc xyz", b"abc xyz");
+    pattern_match!(r"/^(?u:abc)\b xyz$/", b"abc xyz", b"abc xyz");
+    pattern_match!(r"/(?u)^abc(?-u:\b) xyz$/", b"abc xyz", b"abc xyz");
+
+    pattern_true!(r"/(?u)^...$/", "🙈🙉🙊".as_bytes());
+    pattern_false!(r"/(?u)^.(?-u)..$/", "🙈🙉🙊".as_bytes());
+    pattern_match!(r"/(?u)\d+abc/", "٠١٢abc".as_bytes(), "٠١٢abc".as_bytes());
+    pattern_match!(r"/(?u)abc\d+/", "abc٠١٢".as_bytes(), "abc٠١٢".as_bytes());
+    pattern_false!(r"/(?u)\d+abc/", b"xyzabc");
 
     // TODO: enable if we ever implement unicode support for regexps.
     //pattern_match!(r"/(?u)^abc \bxyz$/", b"abc xyz", b"abc xyz");
@@ -3009,8 +3478,21 @@ fn fullword() {
         r#"/ip{2}i/ wide fullword"#,
         b"m\x00i\x00s\x00s\x00i\x00s\x00s\x00i\x00p\x00p\x00i\x00"
     );
-}
 
+    // Regression test: verify_full_word was called with a shadowed sub-slice
+    // of the scanned data (only pattern.len() bytes) instead of the full
+    // scanned data. When the match occurred at a position greater than the
+    // pattern length, this caused an index out-of-bounds panic.
+    //
+    // The regex /\x01\x02.\x04\x05/s with `fullword` is compiled as a
+    // LiteralWithMask sub-pattern. Placing the matching bytes at offset 10
+    // (greater than the pattern length of 5) triggers the bug because
+    // verify_full_word tries to access scanned_data[9] on a 5-byte slice.
+    pattern_true!(
+        r#"/\x01\x02.\x04\x05/s fullword"#,
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05"
+    );
+}
 #[test]
 fn base64() {
     pattern_true!(
@@ -3676,6 +4158,19 @@ fn of() {
           strings:
             $a1 = "foo"
             $a2 = "bar"
+          condition:
+            0 of them
+        }
+        "#,
+        &[]
+    );
+
+    rule_true!(
+        r#"
+        rule test {
+          strings:
+            $a1 = "foo"
+            $a2 = "bar"
             $b1 = "baz"
           condition:
             all of ($a*, $b*)
@@ -4040,7 +4535,7 @@ fn eight_rules() {
 }
 
 #[test]
-fn test_defined_1() {
+fn defined_1() {
     condition_true!(r#"defined 1"#);
     condition_true!(r#"defined 1.0"#);
     condition_true!(r#"defined false"#);
@@ -4052,7 +4547,7 @@ fn test_defined_1() {
 
 #[test]
 #[cfg(feature = "test_proto2-module")]
-fn test_defined_2() {
+fn defined_2() {
     condition_false!(r#"defined test_proto2.undef_i64()"#);
     condition_true!(r#"not defined test_proto2.undef_i64()"#);
     condition_true!(
@@ -4062,7 +4557,7 @@ fn test_defined_2() {
 
 #[test]
 #[cfg(feature = "test_proto3-module")]
-fn test_defined_3() {
+fn defined_3() {
     // In modules defined with a proto3 there's no such thing as undefined
     // fields. If the field was not explicitly set to some value, it will
     // have the default value for the type.
@@ -4073,6 +4568,22 @@ fn test_defined_3() {
     condition_false!(r#"test_proto3.bool_undef"#);
     condition_true!(r#"not test_proto3.bool_undef"#);
     condition_true!(r#"test_proto3.string_undef == """#);
+}
+
+#[test]
+#[cfg(feature = "test_proto3-module")]
+fn proto3_integers() {
+    // Like in proto2 modules, fields of type uint32 are promoted to signed
+    // integers (their values are in the range [0, u32::MAX]), while fields of
+    // type uint64 are unsigned integers.
+    condition_true!(r#"test_proto3.uint32_one - 2 == -1"#);
+    condition_true!(r#"test_proto3.uint64_one - 2 == 0xFFFFFFFFFFFFFFFF"#);
+
+    // Dividing an unsigned integer by a promoted `uint32` field produces an
+    // unsigned result, like with any other signed integer.
+    condition_true!(
+        r#"(test_proto3.uint64_zero - 1) \ test_proto3.uint32_one == 0xFFFFFFFFFFFFFFFF"#
+    );
 }
 
 #[test]
@@ -4339,10 +4850,261 @@ fn header_constraints_optimization() {
         "#,
         b"Hello"
     );
+
+    // Regression test for https://github.com/VirusTotal/yara-x/issues/771
+    // A literal pattern used in both a constrained rule and an unconstrained
+    // rule must not inherit the header constraint when deduplicated.
+    rule_false!(
+        r#"
+        rule trigger {
+            strings:
+                $s1 = "testtest" wide ascii
+            condition:
+                uint16(0) == 0x5a4d and $s1
+        }
+        rule bug {
+            strings:
+                $xor = "testtest" xor ascii wide
+                $plain = "testtest" ascii wide
+            condition:
+                $xor and not $plain
+        }
+        "#,
+        b"testtest\nudruudru\n"
+    );
+
+    rule_true!(
+        r#"
+        rule trigger {
+            strings:
+                $s1 = "testtest" wide ascii
+            condition:
+                uint16(0) == 0x5a4d and $s1
+        }
+        rule bug {
+            strings:
+                $xor = "testtest" xor ascii wide
+                $plain = "testtest" ascii wide
+            condition:
+                $xor and not $plain
+        }
+        "#,
+        b"aksdfjlkasj\nudruudru\n"
+    );
 }
 
 #[test]
-fn test_pattern_atoms() {
+fn cross_rule_constraints() {
+    // 1. Header constraint propagated from referenced private rule.
+    let rules = crate::compile(
+        r#"
+        private rule IsPE {
+            condition:
+                uint16(0) == 0x5A4D
+        }
+        rule Amadey {
+            strings:
+                $re = /foo|bar/
+            condition:
+                IsPE and any of them
+        }
+        "#,
+    )
+    .unwrap();
+
+    // Verify header constraint is assigned to pattern.
+    let constraints: Vec<_> = rules.header_constraints().collect();
+    assert_eq!(constraints.len(), 1);
+    assert_eq!(
+        constraints[0].1,
+        &crate::compiler::HeaderConstraint::Constrained(vec![0x4D, 0x5A])
+    );
+
+    // Matches with PE header
+    let mut scanner = crate::Scanner::new(&rules);
+    let results = scanner.scan(b"MZ\0\0foo").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+
+    // Does not match with non-PE header (pattern is disabled)
+    let results = scanner.scan(b"\0\0\0\0foo").unwrap();
+    assert_eq!(results.matching_rules().len(), 0);
+
+    // 2. Header constraint propagated from global rule without explicit reference.
+    let rules = crate::compile(
+        r#"
+        global private rule IsPE {
+            condition:
+                uint16(0) == 0x5A4D
+        }
+        rule Amadey {
+            strings:
+                $re = /foo|bar/
+            condition:
+                any of them
+        }
+        "#,
+    )
+    .unwrap();
+
+    let constraints: Vec<_> = rules.header_constraints().collect();
+    assert_eq!(constraints.len(), 1);
+    assert_eq!(
+        constraints[0].1,
+        &crate::compiler::HeaderConstraint::Constrained(vec![0x4D, 0x5A])
+    );
+
+    let mut scanner = crate::Scanner::new(&rules);
+    let results = scanner.scan(b"MZ\0\0foo").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+    let results = scanner.scan(b"\0\0\0\0foo").unwrap();
+    assert_eq!(results.matching_rules().len(), 0);
+
+    // 3. Filesize bounds propagated from referenced rule.
+    let rules = crate::compile(
+        r#"
+        rule Small {
+            condition:
+                filesize < 100
+        }
+        rule Test {
+            strings:
+                $re = /foo|bar/
+            condition:
+                Small and $re
+        }
+        "#,
+    )
+    .unwrap();
+
+    let bounds: Vec<_> = rules.filesize_bounds().collect();
+    assert_eq!(bounds.len(), 1);
+    assert_eq!(bounds[0].1, &crate::compiler::FilesizeBounds::from(..100));
+
+    // 4. Filesize bounds propagated from global rule.
+    let rules = crate::compile(
+        r#"
+        global rule Small {
+            condition:
+                filesize < 100
+        }
+        rule Test {
+            strings:
+                $re = /foo|bar/
+            condition:
+                $re
+        }
+        "#,
+    )
+    .unwrap();
+
+    let bounds: Vec<_> = rules.filesize_bounds().collect();
+    assert_eq!(bounds.len(), 1);
+    assert_eq!(bounds[0].1, &crate::compiler::FilesizeBounds::from(..100));
+
+    // 5. Chained rule references: A -> B -> C
+    let rules = crate::compile(
+        r#"
+        rule A {
+            condition:
+                uint16(0) == 0x5A4D
+        }
+        rule B {
+            condition:
+                A and uint8(2) == 0x90
+        }
+        rule C {
+            strings:
+                $re = /foo|bar/
+            condition:
+                B and $re
+        }
+        "#,
+    )
+    .unwrap();
+
+    let constraints: Vec<_> = rules.header_constraints().collect();
+    assert_eq!(constraints.len(), 1);
+    assert_eq!(
+        constraints[0].1,
+        &crate::compiler::HeaderConstraint::Constrained(vec![
+            0x4D, 0x5A, 0x90
+        ])
+    );
+
+    // 6. Contradictory header constraints (PE vs ELF)
+    let rules = crate::compile(
+        r#"
+        private rule IsPE {
+            condition:
+                uint16(0) == 0x5A4D
+        }
+        private rule IsELF {
+            condition:
+                uint32(0) == 0x464c457f
+        }
+        rule Impossible {
+            strings:
+                $re = /foo|bar/
+            condition:
+                IsPE and IsELF and $re
+        }
+        "#,
+    )
+    .unwrap();
+
+    let constraints: Vec<_> = rules.header_constraints().collect();
+    assert_eq!(constraints.len(), 1);
+    assert_eq!(
+        constraints[0].1,
+        &crate::compiler::HeaderConstraint::Unsatisfiable
+    );
+
+    let mut scanner = crate::Scanner::new(&rules);
+    let results = scanner.scan(b"MZ\0\0foo").unwrap();
+    assert_eq!(results.matching_rules().len(), 0);
+
+    // 7. Multi-namespace isolation: global rule in ns1 does not affect ns2
+    let mut compiler = crate::Compiler::new();
+    compiler.new_namespace("ns1");
+    compiler
+        .add_source(
+            r#"
+            global rule IsPE {
+                condition:
+                    uint16(0) == 0x5A4D
+            }
+            rule Rule1 {
+                strings:
+                    $re1 = /foo1/
+                condition:
+                    $re1
+            }
+            "#,
+        )
+        .unwrap();
+
+    compiler.new_namespace("ns2");
+    compiler
+        .add_source(
+            r#"
+            rule Rule2 {
+                strings:
+                    $re2 = /foo2/
+                condition:
+                    $re2
+            }
+            "#,
+        )
+        .unwrap();
+
+    let rules = compiler.build();
+    let constraints: std::collections::HashMap<_, _> =
+        rules.header_constraints().collect();
+    assert_eq!(constraints.len(), 1);
+}
+
+#[test]
+fn pattern_atoms() {
     let rules = crate::compile(
         r#"
         rule rule1 {
@@ -4382,46 +5144,46 @@ fn test_pattern_atoms() {
     let mut patterns = rule1.patterns();
     assert_eq!(patterns.len(), 3);
 
-    let pa = patterns.next().unwrap();
-    assert_eq!(pa.identifier(), "$a");
-    let pa_atoms: Vec<_> = pa.atoms().collect();
-    assert_eq!(pa_atoms.len(), 1);
-    assert_eq!(pa_atoms[0].as_slice(), b"ABCD");
-    assert_eq!(pa_atoms[0].as_ref(), b"ABCD");
-    assert_eq!(&*pa_atoms[0], b"ABCD");
+    let pattern = patterns.next().unwrap();
+    assert_eq!(pattern.identifier(), "$a");
+    let atoms: Vec<_> = pattern.atoms().collect();
+    assert_eq!(atoms.len(), 1);
+    assert_eq!(atoms[0].as_slice(), b"ABCD");
+    assert_eq!(atoms[0].as_ref(), b"ABCD");
+    assert_eq!(&*atoms[0], b"ABCD");
 
-    let pb = patterns.next().unwrap();
-    assert_eq!(pb.identifier(), "$b");
-    let pb_atoms: Vec<_> = pb.atoms().collect();
-    assert_eq!(pb_atoms.len(), 1);
-    assert_eq!(pb_atoms[0].as_slice(), &[0x01, 0x02, 0x03, 0x04]);
+    let pattern = patterns.next().unwrap();
+    assert_eq!(pattern.identifier(), "$b");
+    let atoms: Vec<_> = pattern.atoms().collect();
+    assert_eq!(atoms.len(), 1);
+    assert_eq!(atoms[0].as_slice(), &[0x01, 0x02, 0x03, 0x04]);
 
-    let pc = patterns.next().unwrap();
-    assert_eq!(pc.identifier(), "$c");
-    let pc_atoms: Vec<_> = pc.atoms().collect();
-    assert_eq!(pc_atoms.len(), 1);
-    assert_eq!(pc_atoms[0].as_slice(), b"obar");
+    let pattern = patterns.next().unwrap();
+    assert_eq!(pattern.identifier(), "$c");
+    let atoms: Vec<_> = pattern.atoms().collect();
+    assert_eq!(atoms.len(), 1);
+    assert_eq!(atoms[0].as_slice(), b"obar");
 
     // rule2
     let rule2 = rules_iter.next().unwrap();
     assert_eq!(rule2.identifier(), "rule2");
     let mut patterns = rule2.patterns();
 
-    let px = patterns.next().unwrap();
-    assert_eq!(px.identifier(), "$x");
-    let px_atoms: Vec<_> = px.atoms().collect();
-    assert_eq!(px_atoms.len(), 1);
-    assert_eq!(px_atoms[0].as_slice(), b"W\0I\0");
+    let pattern = patterns.next().unwrap();
+    assert_eq!(pattern.identifier(), "$x");
+    let atoms: Vec<_> = pattern.atoms().collect();
+    assert_eq!(atoms.len(), 1);
+    assert_eq!(atoms[0].as_slice(), b"W\0I\0");
 
-    let py = patterns.next().unwrap();
-    assert_eq!(py.identifier(), "$y");
-    let py_atoms = py.atoms();
-    assert!(py_atoms.len() > 1);
+    let pattern = patterns.next().unwrap();
+    assert_eq!(pattern.identifier(), "$y");
+    let atoms = pattern.atoms();
+    assert!(atoms.len() > 1);
     // ExactSizeIterator check
-    assert_eq!(py_atoms.len(), py.atoms().collect::<Vec<_>>().len());
+    assert_eq!(atoms.len(), pattern.atoms().collect::<Vec<_>>().len());
     // DoubleEndedIterator check
-    let rev_atoms: Vec<_> = py.atoms().rev().collect();
-    let mut fwd_atoms: Vec<_> = py.atoms().collect();
+    let rev_atoms: Vec<_> = pattern.atoms().rev().collect();
+    let mut fwd_atoms: Vec<_> = pattern.atoms().collect();
     fwd_atoms.reverse();
     assert_eq!(rev_atoms, fwd_atoms);
 
@@ -4434,8 +5196,100 @@ fn test_pattern_atoms() {
     let rule4 = rules_iter.next().unwrap();
     assert_eq!(rule4.identifier(), "rule4");
     let mut patterns = rule4.patterns();
-    let panchor = patterns.next().unwrap();
-    assert_eq!(panchor.identifier(), "$anchored");
-    assert_eq!(panchor.atoms().len(), 0);
-    assert!(panchor.atoms().next().is_none());
+    let pattern = patterns.next().unwrap();
+    assert_eq!(pattern.identifier(), "$anchored");
+    assert_eq!(pattern.atoms().len(), 0);
+    assert!(pattern.atoms().next().is_none());
+}
+
+#[test]
+fn header_constraints_int64() {
+    let rules = crate::compile(
+        r#"
+        rule test_le {
+            strings:
+                $a = /foo.*x/
+            condition:
+                int64(0) == -2 and $a
+        }
+        rule test_be {
+            strings:
+                $b = /bar.*y/
+            condition:
+                int64be(0) == 0x0102030405060708 and $b
+        }
+        "#,
+    )
+    .unwrap();
+
+    let constraints: Vec<_> = rules.header_constraints().collect();
+    assert_eq!(constraints.len(), 2);
+    assert!(constraints.iter().any(|(_, c)| {
+        *c == &crate::compiler::HeaderConstraint::Constrained(vec![
+            0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ])
+    }));
+    assert!(constraints.iter().any(|(_, c)| {
+        *c == &crate::compiler::HeaderConstraint::Constrained(vec![
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        ])
+    }));
+
+    let mut scanner = crate::Scanner::new(&rules);
+    let results =
+        scanner.scan(b"\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFFfoox").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+
+    let results =
+        scanner.scan(b"\x01\x02\x03\x04\x05\x06\x07\x08bary").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+
+    let results = scanner.scan(b"\0\0\0\0\0\0\0\0\0\0foox bary").unwrap();
+    assert_eq!(results.matching_rules().len(), 0);
+}
+
+#[test]
+fn header_constraints_uint64() {
+    let rules = crate::compile(
+        r#"
+        rule test_le {
+            strings:
+                $a = /foo.*x/
+            condition:
+                uint64(0) == 0xFFFFFFFFFFFFFFFE and $a
+        }
+        rule test_be {
+            strings:
+                $b = /bar.*y/
+            condition:
+                uint64be(0) == 0x8000000000000001 and $b
+        }
+        "#,
+    )
+    .unwrap();
+
+    let constraints: Vec<_> = rules.header_constraints().collect();
+    assert_eq!(constraints.len(), 2);
+    assert!(constraints.iter().any(|(_, c)| {
+        *c == &crate::compiler::HeaderConstraint::Constrained(vec![
+            0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ])
+    }));
+    assert!(constraints.iter().any(|(_, c)| {
+        *c == &crate::compiler::HeaderConstraint::Constrained(vec![
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        ])
+    }));
+
+    let mut scanner = crate::Scanner::new(&rules);
+    let results =
+        scanner.scan(b"\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFFfoox").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+
+    let results =
+        scanner.scan(b"\x80\x00\x00\x00\x00\x00\x00\x01bary").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+
+    let results = scanner.scan(b"\0\0\0\0\0\0\0\0\0\0foox bary").unwrap();
+    assert_eq!(results.matching_rules().len(), 0);
 }

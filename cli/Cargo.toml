@@ -74,13 +74,13 @@ serde = { workspace = true, features = ["derive"] }
 strum = { workspace = true }
 strum_macros = { workspace = true }
 yansi = { workspace = true }
-yara-x = { workspace = true, features = ["parallel-compilation"] }
+yara-x = { workspace = true, default-features = true, features = ["parallel-compilation"] }
 yara-x-parser = { workspace = true }
 yara-x-proto = { workspace = true }
 yara-x-fmt = { workspace = true }
 
 chardetng = "1.0.0"
-crossbeam = "0.8.4"
+crossbeam = "0.8.5"
 crossterm = "0.29.0"
 dunce = "1.0.5"
 indicatif = "0.18.6"

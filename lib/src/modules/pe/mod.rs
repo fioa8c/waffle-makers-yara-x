@@ -82,6 +82,19 @@ fn rva_to_offset(ctx: &ScanContext, rva: i64) -> Option<i64> {
     Some(offset.into())
 }
 
+/// Convert a file offset to a relative virtual address (RVA).
+#[module_export]
+fn offset_to_rva(ctx: &ScanContext, offset: i64) -> Option<i64> {
+    let pe = ctx.module_output::<PE>()?;
+    let rva = rva2off::offset_to_rva(
+        offset.try_into().ok()?,
+        pe.sections.as_slice(),
+        pe.file_alignment?,
+        pe.section_alignment?,
+    )?;
+    Some(rva.into())
+}
+
 /// Returns the PE checksum, as calculated by YARA.
 ///
 /// This is useful for comparing with the checksum appearing in the PE header
@@ -160,7 +173,7 @@ fn calculate_checksum(ctx: &mut ScanContext) -> Option<i64> {
     sum = (sum & 0xffff) + (sum >> 16);
     sum += sum >> 16;
     sum &= 0xffff;
-    sum += data.len() as u32;
+    sum = sum.wrapping_add(data.len() as u32);
 
     CHECKSUM_CACHE.with(|cache| {
         *cache.borrow_mut() = Some(sum.into());
@@ -195,9 +208,10 @@ fn section_index_offset(ctx: &ScanContext, offset: i64) -> Option<i64> {
         .iter()
         .find_position(|section| {
             match (section.raw_data_offset, section.raw_data_size) {
-                (Some(section_offset), Some(section_size)) => (section_offset
-                    ..section_offset + section_size)
-                    .contains(&offset),
+                (Some(section_offset), Some(section_size)) => {
+                    offset >= section_offset
+                        && offset - section_offset < section_size
+                }
                 _ => false,
             }
         })
@@ -237,21 +251,25 @@ fn imphash(ctx: &mut ScanContext) -> Option<Lowercase<FixedLenString<32>>> {
     let mut first = true;
 
     for import in &pe.import_details {
-        let dll_name = trim_import_library_extension(
-            import.library_name.as_deref().unwrap(),
-        );
+        let Some(dll_name) = import.library_name.as_deref() else {
+            continue;
+        };
+        let dll_name = trim_import_library_extension(dll_name);
         for func in &import.functions {
+            let Some(func_name) = func.name.as_deref() else {
+                continue;
+            };
             if !first {
                 Digest::update(&mut md5_hash, ",".as_bytes())
             }
             update_lowercase(&mut md5_hash, dll_name);
             Digest::update(&mut md5_hash, ".".as_bytes());
-            update_lowercase(&mut md5_hash, func.name.as_deref().unwrap());
+            update_lowercase(&mut md5_hash, func_name);
             first = false;
         }
     }
 
-    let digest = format!("{:x}", md5_hash.finalize());
+    let digest = hex::encode(md5_hash.finalize());
 
     IMPHASH_CACHE.with(|cache| {
         *cache.borrow_mut() = Some(digest.clone());
@@ -341,12 +359,10 @@ fn rich_version_impl(
         .iter()
         .filter_map(|t| {
             let toolid_matches = toolid
-                .map(|toolid| toolid == t.toolid.unwrap() as i64)
-                .unwrap_or(true);
+                .is_none_or(|id| t.toolid.is_some_and(|tid| id == tid as i64));
 
             let version_matches = version
-                .map(|version| version == t.version.unwrap() as i64)
-                .unwrap_or(true);
+                .is_none_or(|ver| t.version.is_some_and(|v| ver == v as i64));
 
             if toolid_matches && version_matches {
                 t.times.map(|v| v as i64)
@@ -687,13 +703,13 @@ fn valid_on(
     let not_before = signature
         .field_by_name("not_before")
         .unwrap()
-        .type_value
+        .type_value()
         .try_as_integer()?;
 
     let not_after = signature
         .field_by_name("not_after")
         .unwrap()
-        .type_value
+        .type_value()
         .try_as_integer()?;
 
     Some(timestamp >= not_before && timestamp <= not_after)

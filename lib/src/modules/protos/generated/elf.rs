@@ -35,25 +35,25 @@ pub struct ELF {
     // @@protoc_insertion_point(field:elf.ELF.osabi)
     pub osabi: ::std::option::Option<::protobuf::EnumOrUnknown<OsAbi>>,
     // @@protoc_insertion_point(field:elf.ELF.entry_point)
-    pub entry_point: ::std::option::Option<u64>,
+    pub entry_point: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.sh_offset)
-    pub sh_offset: ::std::option::Option<u64>,
+    pub sh_offset: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.sh_entry_size)
     pub sh_entry_size: ::std::option::Option<u32>,
     // @@protoc_insertion_point(field:elf.ELF.ph_offset)
-    pub ph_offset: ::std::option::Option<u64>,
+    pub ph_offset: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.ph_entry_size)
     pub ph_entry_size: ::std::option::Option<u32>,
     // @@protoc_insertion_point(field:elf.ELF.number_of_sections)
-    pub number_of_sections: ::std::option::Option<u64>,
+    pub number_of_sections: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.number_of_segments)
-    pub number_of_segments: ::std::option::Option<u64>,
+    pub number_of_segments: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.symtab_entries)
-    pub symtab_entries: ::std::option::Option<u64>,
+    pub symtab_entries: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.dynsym_entries)
-    pub dynsym_entries: ::std::option::Option<u64>,
+    pub dynsym_entries: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.dynamic_section_entries)
-    pub dynamic_section_entries: ::std::option::Option<u64>,
+    pub dynamic_section_entries: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.ELF.sections)
     pub sections: ::std::vec::Vec<Section>,
     // @@protoc_insertion_point(field:elf.ELF.segments)
@@ -146,9 +146,9 @@ impl ELF {
         self.osabi = ::std::option::Option::Some(::protobuf::EnumOrUnknown::new(v));
     }
 
-    // optional uint64 entry_point = 3;
+    // optional int64 entry_point = 3;
 
-    pub fn entry_point(&self) -> u64 {
+    pub fn entry_point(&self) -> i64 {
         self.entry_point.unwrap_or(0)
     }
 
@@ -161,13 +161,13 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_entry_point(&mut self, v: u64) {
+    pub fn set_entry_point(&mut self, v: i64) {
         self.entry_point = ::std::option::Option::Some(v);
     }
 
-    // optional uint64 sh_offset = 4;
+    // optional int64 sh_offset = 4;
 
-    pub fn sh_offset(&self) -> u64 {
+    pub fn sh_offset(&self) -> i64 {
         self.sh_offset.unwrap_or(0)
     }
 
@@ -180,7 +180,7 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_sh_offset(&mut self, v: u64) {
+    pub fn set_sh_offset(&mut self, v: i64) {
         self.sh_offset = ::std::option::Option::Some(v);
     }
 
@@ -203,9 +203,9 @@ impl ELF {
         self.sh_entry_size = ::std::option::Option::Some(v);
     }
 
-    // optional uint64 ph_offset = 6;
+    // optional int64 ph_offset = 6;
 
-    pub fn ph_offset(&self) -> u64 {
+    pub fn ph_offset(&self) -> i64 {
         self.ph_offset.unwrap_or(0)
     }
 
@@ -218,7 +218,7 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_ph_offset(&mut self, v: u64) {
+    pub fn set_ph_offset(&mut self, v: i64) {
         self.ph_offset = ::std::option::Option::Some(v);
     }
 
@@ -241,9 +241,9 @@ impl ELF {
         self.ph_entry_size = ::std::option::Option::Some(v);
     }
 
-    // optional uint64 number_of_sections = 8;
+    // optional int64 number_of_sections = 8;
 
-    pub fn number_of_sections(&self) -> u64 {
+    pub fn number_of_sections(&self) -> i64 {
         self.number_of_sections.unwrap_or(0)
     }
 
@@ -256,13 +256,13 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_number_of_sections(&mut self, v: u64) {
+    pub fn set_number_of_sections(&mut self, v: i64) {
         self.number_of_sections = ::std::option::Option::Some(v);
     }
 
-    // optional uint64 number_of_segments = 9;
+    // optional int64 number_of_segments = 9;
 
-    pub fn number_of_segments(&self) -> u64 {
+    pub fn number_of_segments(&self) -> i64 {
         self.number_of_segments.unwrap_or(0)
     }
 
@@ -275,13 +275,13 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_number_of_segments(&mut self, v: u64) {
+    pub fn set_number_of_segments(&mut self, v: i64) {
         self.number_of_segments = ::std::option::Option::Some(v);
     }
 
-    // optional uint64 symtab_entries = 10;
+    // optional int64 symtab_entries = 10;
 
-    pub fn symtab_entries(&self) -> u64 {
+    pub fn symtab_entries(&self) -> i64 {
         self.symtab_entries.unwrap_or(0)
     }
 
@@ -294,13 +294,13 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_symtab_entries(&mut self, v: u64) {
+    pub fn set_symtab_entries(&mut self, v: i64) {
         self.symtab_entries = ::std::option::Option::Some(v);
     }
 
-    // optional uint64 dynsym_entries = 11;
+    // optional int64 dynsym_entries = 11;
 
-    pub fn dynsym_entries(&self) -> u64 {
+    pub fn dynsym_entries(&self) -> i64 {
         self.dynsym_entries.unwrap_or(0)
     }
 
@@ -313,13 +313,13 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_dynsym_entries(&mut self, v: u64) {
+    pub fn set_dynsym_entries(&mut self, v: i64) {
         self.dynsym_entries = ::std::option::Option::Some(v);
     }
 
-    // optional uint64 dynamic_section_entries = 12;
+    // optional int64 dynamic_section_entries = 12;
 
-    pub fn dynamic_section_entries(&self) -> u64 {
+    pub fn dynamic_section_entries(&self) -> i64 {
         self.dynamic_section_entries.unwrap_or(0)
     }
 
@@ -332,7 +332,7 @@ impl ELF {
     }
 
     // Param is passed by value, moved
-    pub fn set_dynamic_section_entries(&mut self, v: u64) {
+    pub fn set_dynamic_section_entries(&mut self, v: i64) {
         self.dynamic_section_entries = ::std::option::Option::Some(v);
     }
 
@@ -482,34 +482,34 @@ impl ::protobuf::Message for ELF {
                     self.osabi = ::std::option::Option::Some(is.read_enum_or_unknown()?);
                 },
                 24 => {
-                    self.entry_point = ::std::option::Option::Some(is.read_uint64()?);
+                    self.entry_point = ::std::option::Option::Some(is.read_int64()?);
                 },
                 32 => {
-                    self.sh_offset = ::std::option::Option::Some(is.read_uint64()?);
+                    self.sh_offset = ::std::option::Option::Some(is.read_int64()?);
                 },
                 40 => {
                     self.sh_entry_size = ::std::option::Option::Some(is.read_uint32()?);
                 },
                 48 => {
-                    self.ph_offset = ::std::option::Option::Some(is.read_uint64()?);
+                    self.ph_offset = ::std::option::Option::Some(is.read_int64()?);
                 },
                 56 => {
                     self.ph_entry_size = ::std::option::Option::Some(is.read_uint32()?);
                 },
                 64 => {
-                    self.number_of_sections = ::std::option::Option::Some(is.read_uint64()?);
+                    self.number_of_sections = ::std::option::Option::Some(is.read_int64()?);
                 },
                 72 => {
-                    self.number_of_segments = ::std::option::Option::Some(is.read_uint64()?);
+                    self.number_of_segments = ::std::option::Option::Some(is.read_int64()?);
                 },
                 80 => {
-                    self.symtab_entries = ::std::option::Option::Some(is.read_uint64()?);
+                    self.symtab_entries = ::std::option::Option::Some(is.read_int64()?);
                 },
                 88 => {
-                    self.dynsym_entries = ::std::option::Option::Some(is.read_uint64()?);
+                    self.dynsym_entries = ::std::option::Option::Some(is.read_int64()?);
                 },
                 96 => {
-                    self.dynamic_section_entries = ::std::option::Option::Some(is.read_uint64()?);
+                    self.dynamic_section_entries = ::std::option::Option::Some(is.read_int64()?);
                 },
                 106 => {
                     self.sections.push(is.read_message()?);
@@ -548,34 +548,34 @@ impl ::protobuf::Message for ELF {
             my_size += ::protobuf::rt::int32_size(18, v.value());
         }
         if let Some(v) = self.entry_point {
-            my_size += ::protobuf::rt::uint64_size(3, v);
+            my_size += ::protobuf::rt::int64_size(3, v);
         }
         if let Some(v) = self.sh_offset {
-            my_size += ::protobuf::rt::uint64_size(4, v);
+            my_size += ::protobuf::rt::int64_size(4, v);
         }
         if let Some(v) = self.sh_entry_size {
             my_size += ::protobuf::rt::uint32_size(5, v);
         }
         if let Some(v) = self.ph_offset {
-            my_size += ::protobuf::rt::uint64_size(6, v);
+            my_size += ::protobuf::rt::int64_size(6, v);
         }
         if let Some(v) = self.ph_entry_size {
             my_size += ::protobuf::rt::uint32_size(7, v);
         }
         if let Some(v) = self.number_of_sections {
-            my_size += ::protobuf::rt::uint64_size(8, v);
+            my_size += ::protobuf::rt::int64_size(8, v);
         }
         if let Some(v) = self.number_of_segments {
-            my_size += ::protobuf::rt::uint64_size(9, v);
+            my_size += ::protobuf::rt::int64_size(9, v);
         }
         if let Some(v) = self.symtab_entries {
-            my_size += ::protobuf::rt::uint64_size(10, v);
+            my_size += ::protobuf::rt::int64_size(10, v);
         }
         if let Some(v) = self.dynsym_entries {
-            my_size += ::protobuf::rt::uint64_size(11, v);
+            my_size += ::protobuf::rt::int64_size(11, v);
         }
         if let Some(v) = self.dynamic_section_entries {
-            my_size += ::protobuf::rt::uint64_size(12, v);
+            my_size += ::protobuf::rt::int64_size(12, v);
         }
         for value in &self.sections {
             let len = value.compute_size();
@@ -613,34 +613,34 @@ impl ::protobuf::Message for ELF {
             os.write_enum(18, ::protobuf::EnumOrUnknown::value(&v))?;
         }
         if let Some(v) = self.entry_point {
-            os.write_uint64(3, v)?;
+            os.write_int64(3, v)?;
         }
         if let Some(v) = self.sh_offset {
-            os.write_uint64(4, v)?;
+            os.write_int64(4, v)?;
         }
         if let Some(v) = self.sh_entry_size {
             os.write_uint32(5, v)?;
         }
         if let Some(v) = self.ph_offset {
-            os.write_uint64(6, v)?;
+            os.write_int64(6, v)?;
         }
         if let Some(v) = self.ph_entry_size {
             os.write_uint32(7, v)?;
         }
         if let Some(v) = self.number_of_sections {
-            os.write_uint64(8, v)?;
+            os.write_int64(8, v)?;
         }
         if let Some(v) = self.number_of_segments {
-            os.write_uint64(9, v)?;
+            os.write_int64(9, v)?;
         }
         if let Some(v) = self.symtab_entries {
-            os.write_uint64(10, v)?;
+            os.write_int64(10, v)?;
         }
         if let Some(v) = self.dynsym_entries {
-            os.write_uint64(11, v)?;
+            os.write_int64(11, v)?;
         }
         if let Some(v) = self.dynamic_section_entries {
-            os.write_uint64(12, v)?;
+            os.write_int64(12, v)?;
         }
         for v in &self.sections {
             ::protobuf::rt::write_message_field_with_cached_size(13, v, os)?;
@@ -745,13 +745,13 @@ pub struct Section {
     // @@protoc_insertion_point(field:elf.Section.type)
     pub type_: ::std::option::Option<::protobuf::EnumOrUnknown<SectionType>>,
     // @@protoc_insertion_point(field:elf.Section.flags)
-    pub flags: ::std::option::Option<u64>,
+    pub flags: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Section.address)
-    pub address: ::std::option::Option<u64>,
+    pub address: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Section.size)
-    pub size: ::std::option::Option<u64>,
+    pub size: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Section.offset)
-    pub offset: ::std::option::Option<u64>,
+    pub offset: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Section.name)
     pub name: ::std::option::Option<::std::string::String>,
     // special fields
@@ -792,9 +792,9 @@ impl Section {
         self.type_ = ::std::option::Option::Some(::protobuf::EnumOrUnknown::new(v));
     }
 
-    // required uint64 flags = 2;
+    // required int64 flags = 2;
 
-    pub fn flags(&self) -> u64 {
+    pub fn flags(&self) -> i64 {
         self.flags.unwrap_or(0)
     }
 
@@ -807,13 +807,13 @@ impl Section {
     }
 
     // Param is passed by value, moved
-    pub fn set_flags(&mut self, v: u64) {
+    pub fn set_flags(&mut self, v: i64) {
         self.flags = ::std::option::Option::Some(v);
     }
 
-    // required uint64 address = 3;
+    // required int64 address = 3;
 
-    pub fn address(&self) -> u64 {
+    pub fn address(&self) -> i64 {
         self.address.unwrap_or(0)
     }
 
@@ -826,13 +826,13 @@ impl Section {
     }
 
     // Param is passed by value, moved
-    pub fn set_address(&mut self, v: u64) {
+    pub fn set_address(&mut self, v: i64) {
         self.address = ::std::option::Option::Some(v);
     }
 
-    // required uint64 size = 4;
+    // required int64 size = 4;
 
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> i64 {
         self.size.unwrap_or(0)
     }
 
@@ -845,13 +845,13 @@ impl Section {
     }
 
     // Param is passed by value, moved
-    pub fn set_size(&mut self, v: u64) {
+    pub fn set_size(&mut self, v: i64) {
         self.size = ::std::option::Option::Some(v);
     }
 
-    // required uint64 offset = 5;
+    // required int64 offset = 5;
 
-    pub fn offset(&self) -> u64 {
+    pub fn offset(&self) -> i64 {
         self.offset.unwrap_or(0)
     }
 
@@ -864,7 +864,7 @@ impl Section {
     }
 
     // Param is passed by value, moved
-    pub fn set_offset(&mut self, v: u64) {
+    pub fn set_offset(&mut self, v: i64) {
         self.offset = ::std::option::Option::Some(v);
     }
 
@@ -974,16 +974,16 @@ impl ::protobuf::Message for Section {
                     self.type_ = ::std::option::Option::Some(is.read_enum_or_unknown()?);
                 },
                 16 => {
-                    self.flags = ::std::option::Option::Some(is.read_uint64()?);
+                    self.flags = ::std::option::Option::Some(is.read_int64()?);
                 },
                 24 => {
-                    self.address = ::std::option::Option::Some(is.read_uint64()?);
+                    self.address = ::std::option::Option::Some(is.read_int64()?);
                 },
                 32 => {
-                    self.size = ::std::option::Option::Some(is.read_uint64()?);
+                    self.size = ::std::option::Option::Some(is.read_int64()?);
                 },
                 40 => {
-                    self.offset = ::std::option::Option::Some(is.read_uint64()?);
+                    self.offset = ::std::option::Option::Some(is.read_int64()?);
                 },
                 50 => {
                     self.name = ::std::option::Option::Some(is.read_string()?);
@@ -1004,16 +1004,16 @@ impl ::protobuf::Message for Section {
             my_size += ::protobuf::rt::int32_size(1, v.value());
         }
         if let Some(v) = self.flags {
-            my_size += ::protobuf::rt::uint64_size(2, v);
+            my_size += ::protobuf::rt::int64_size(2, v);
         }
         if let Some(v) = self.address {
-            my_size += ::protobuf::rt::uint64_size(3, v);
+            my_size += ::protobuf::rt::int64_size(3, v);
         }
         if let Some(v) = self.size {
-            my_size += ::protobuf::rt::uint64_size(4, v);
+            my_size += ::protobuf::rt::int64_size(4, v);
         }
         if let Some(v) = self.offset {
-            my_size += ::protobuf::rt::uint64_size(5, v);
+            my_size += ::protobuf::rt::int64_size(5, v);
         }
         if let Some(v) = self.name.as_ref() {
             my_size += ::protobuf::rt::string_size(6, &v);
@@ -1028,16 +1028,16 @@ impl ::protobuf::Message for Section {
             os.write_enum(1, ::protobuf::EnumOrUnknown::value(&v))?;
         }
         if let Some(v) = self.flags {
-            os.write_uint64(2, v)?;
+            os.write_int64(2, v)?;
         }
         if let Some(v) = self.address {
-            os.write_uint64(3, v)?;
+            os.write_int64(3, v)?;
         }
         if let Some(v) = self.size {
-            os.write_uint64(4, v)?;
+            os.write_int64(4, v)?;
         }
         if let Some(v) = self.offset {
-            os.write_uint64(5, v)?;
+            os.write_int64(5, v)?;
         }
         if let Some(v) = self.name.as_ref() {
             os.write_string(6, v)?;
@@ -1108,17 +1108,17 @@ pub struct Segment {
     // @@protoc_insertion_point(field:elf.Segment.flags)
     pub flags: ::std::option::Option<u32>,
     // @@protoc_insertion_point(field:elf.Segment.offset)
-    pub offset: ::std::option::Option<u64>,
+    pub offset: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Segment.virtual_address)
-    pub virtual_address: ::std::option::Option<u64>,
+    pub virtual_address: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Segment.physical_address)
-    pub physical_address: ::std::option::Option<u64>,
+    pub physical_address: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Segment.file_size)
-    pub file_size: ::std::option::Option<u64>,
+    pub file_size: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Segment.memory_size)
-    pub memory_size: ::std::option::Option<u64>,
+    pub memory_size: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Segment.alignment)
-    pub alignment: ::std::option::Option<u64>,
+    pub alignment: ::std::option::Option<i64>,
     // special fields
     // @@protoc_insertion_point(special_field:elf.Segment.special_fields)
     pub special_fields: ::protobuf::SpecialFields,
@@ -1176,9 +1176,9 @@ impl Segment {
         self.flags = ::std::option::Option::Some(v);
     }
 
-    // required uint64 offset = 3;
+    // required int64 offset = 3;
 
-    pub fn offset(&self) -> u64 {
+    pub fn offset(&self) -> i64 {
         self.offset.unwrap_or(0)
     }
 
@@ -1191,13 +1191,13 @@ impl Segment {
     }
 
     // Param is passed by value, moved
-    pub fn set_offset(&mut self, v: u64) {
+    pub fn set_offset(&mut self, v: i64) {
         self.offset = ::std::option::Option::Some(v);
     }
 
-    // required uint64 virtual_address = 4;
+    // required int64 virtual_address = 4;
 
-    pub fn virtual_address(&self) -> u64 {
+    pub fn virtual_address(&self) -> i64 {
         self.virtual_address.unwrap_or(0)
     }
 
@@ -1210,13 +1210,13 @@ impl Segment {
     }
 
     // Param is passed by value, moved
-    pub fn set_virtual_address(&mut self, v: u64) {
+    pub fn set_virtual_address(&mut self, v: i64) {
         self.virtual_address = ::std::option::Option::Some(v);
     }
 
-    // required uint64 physical_address = 5;
+    // required int64 physical_address = 5;
 
-    pub fn physical_address(&self) -> u64 {
+    pub fn physical_address(&self) -> i64 {
         self.physical_address.unwrap_or(0)
     }
 
@@ -1229,13 +1229,13 @@ impl Segment {
     }
 
     // Param is passed by value, moved
-    pub fn set_physical_address(&mut self, v: u64) {
+    pub fn set_physical_address(&mut self, v: i64) {
         self.physical_address = ::std::option::Option::Some(v);
     }
 
-    // required uint64 file_size = 6;
+    // required int64 file_size = 6;
 
-    pub fn file_size(&self) -> u64 {
+    pub fn file_size(&self) -> i64 {
         self.file_size.unwrap_or(0)
     }
 
@@ -1248,13 +1248,13 @@ impl Segment {
     }
 
     // Param is passed by value, moved
-    pub fn set_file_size(&mut self, v: u64) {
+    pub fn set_file_size(&mut self, v: i64) {
         self.file_size = ::std::option::Option::Some(v);
     }
 
-    // required uint64 memory_size = 7;
+    // required int64 memory_size = 7;
 
-    pub fn memory_size(&self) -> u64 {
+    pub fn memory_size(&self) -> i64 {
         self.memory_size.unwrap_or(0)
     }
 
@@ -1267,13 +1267,13 @@ impl Segment {
     }
 
     // Param is passed by value, moved
-    pub fn set_memory_size(&mut self, v: u64) {
+    pub fn set_memory_size(&mut self, v: i64) {
         self.memory_size = ::std::option::Option::Some(v);
     }
 
-    // required uint64 alignment = 8;
+    // required int64 alignment = 8;
 
-    pub fn alignment(&self) -> u64 {
+    pub fn alignment(&self) -> i64 {
         self.alignment.unwrap_or(0)
     }
 
@@ -1286,7 +1286,7 @@ impl Segment {
     }
 
     // Param is passed by value, moved
-    pub fn set_alignment(&mut self, v: u64) {
+    pub fn set_alignment(&mut self, v: i64) {
         self.alignment = ::std::option::Option::Some(v);
     }
 
@@ -1382,22 +1382,22 @@ impl ::protobuf::Message for Segment {
                     self.flags = ::std::option::Option::Some(is.read_uint32()?);
                 },
                 24 => {
-                    self.offset = ::std::option::Option::Some(is.read_uint64()?);
+                    self.offset = ::std::option::Option::Some(is.read_int64()?);
                 },
                 32 => {
-                    self.virtual_address = ::std::option::Option::Some(is.read_uint64()?);
+                    self.virtual_address = ::std::option::Option::Some(is.read_int64()?);
                 },
                 40 => {
-                    self.physical_address = ::std::option::Option::Some(is.read_uint64()?);
+                    self.physical_address = ::std::option::Option::Some(is.read_int64()?);
                 },
                 48 => {
-                    self.file_size = ::std::option::Option::Some(is.read_uint64()?);
+                    self.file_size = ::std::option::Option::Some(is.read_int64()?);
                 },
                 56 => {
-                    self.memory_size = ::std::option::Option::Some(is.read_uint64()?);
+                    self.memory_size = ::std::option::Option::Some(is.read_int64()?);
                 },
                 64 => {
-                    self.alignment = ::std::option::Option::Some(is.read_uint64()?);
+                    self.alignment = ::std::option::Option::Some(is.read_int64()?);
                 },
                 tag => {
                     ::protobuf::rt::read_unknown_or_skip_group(tag, is, self.special_fields.mut_unknown_fields())?;
@@ -1418,22 +1418,22 @@ impl ::protobuf::Message for Segment {
             my_size += ::protobuf::rt::uint32_size(2, v);
         }
         if let Some(v) = self.offset {
-            my_size += ::protobuf::rt::uint64_size(3, v);
+            my_size += ::protobuf::rt::int64_size(3, v);
         }
         if let Some(v) = self.virtual_address {
-            my_size += ::protobuf::rt::uint64_size(4, v);
+            my_size += ::protobuf::rt::int64_size(4, v);
         }
         if let Some(v) = self.physical_address {
-            my_size += ::protobuf::rt::uint64_size(5, v);
+            my_size += ::protobuf::rt::int64_size(5, v);
         }
         if let Some(v) = self.file_size {
-            my_size += ::protobuf::rt::uint64_size(6, v);
+            my_size += ::protobuf::rt::int64_size(6, v);
         }
         if let Some(v) = self.memory_size {
-            my_size += ::protobuf::rt::uint64_size(7, v);
+            my_size += ::protobuf::rt::int64_size(7, v);
         }
         if let Some(v) = self.alignment {
-            my_size += ::protobuf::rt::uint64_size(8, v);
+            my_size += ::protobuf::rt::int64_size(8, v);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.special_fields.unknown_fields());
         self.special_fields.cached_size().set(my_size as u32);
@@ -1448,22 +1448,22 @@ impl ::protobuf::Message for Segment {
             os.write_uint32(2, v)?;
         }
         if let Some(v) = self.offset {
-            os.write_uint64(3, v)?;
+            os.write_int64(3, v)?;
         }
         if let Some(v) = self.virtual_address {
-            os.write_uint64(4, v)?;
+            os.write_int64(4, v)?;
         }
         if let Some(v) = self.physical_address {
-            os.write_uint64(5, v)?;
+            os.write_int64(5, v)?;
         }
         if let Some(v) = self.file_size {
-            os.write_uint64(6, v)?;
+            os.write_int64(6, v)?;
         }
         if let Some(v) = self.memory_size {
-            os.write_uint64(7, v)?;
+            os.write_int64(7, v)?;
         }
         if let Some(v) = self.alignment {
-            os.write_uint64(8, v)?;
+            os.write_int64(8, v)?;
         }
         os.write_unknown_fields(self.special_fields.unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -1533,9 +1533,9 @@ pub struct Sym {
     // @@protoc_insertion_point(field:elf.Sym.name)
     pub name: ::std::option::Option<::std::string::String>,
     // @@protoc_insertion_point(field:elf.Sym.value)
-    pub value: ::std::option::Option<u64>,
+    pub value: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Sym.size)
-    pub size: ::std::option::Option<u64>,
+    pub size: ::std::option::Option<i64>,
     // @@protoc_insertion_point(field:elf.Sym.type)
     pub type_: ::std::option::Option<::protobuf::EnumOrUnknown<SymType>>,
     // @@protoc_insertion_point(field:elf.Sym.bind)
@@ -1596,9 +1596,9 @@ impl Sym {
         self.name.take().unwrap_or_else(|| ::std::string::String::new())
     }
 
-    // required uint64 value = 2;
+    // required int64 value = 2;
 
-    pub fn value(&self) -> u64 {
+    pub fn value(&self) -> i64 {
         self.value.unwrap_or(0)
     }
 
@@ -1611,13 +1611,13 @@ impl Sym {
     }
 
     // Param is passed by value, moved
-    pub fn set_value(&mut self, v: u64) {
+    pub fn set_value(&mut self, v: i64) {
         self.value = ::std::option::Option::Some(v);
     }
 
-    // required uint64 size = 3;
+    // required int64 size = 3;
 
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> i64 {
         self.size.unwrap_or(0)
     }
 
@@ -1630,7 +1630,7 @@ impl Sym {
     }
 
     // Param is passed by value, moved
-    pub fn set_size(&mut self, v: u64) {
+    pub fn set_size(&mut self, v: i64) {
         self.size = ::std::option::Option::Some(v);
     }
 
@@ -1797,10 +1797,10 @@ impl ::protobuf::Message for Sym {
                     self.name = ::std::option::Option::Some(is.read_string()?);
                 },
                 16 => {
-                    self.value = ::std::option::Option::Some(is.read_uint64()?);
+                    self.value = ::std::option::Option::Some(is.read_int64()?);
                 },
                 24 => {
-                    self.size = ::std::option::Option::Some(is.read_uint64()?);
+                    self.size = ::std::option::Option::Some(is.read_int64()?);
                 },
                 32 => {
                     self.type_ = ::std::option::Option::Some(is.read_enum_or_unknown()?);
@@ -1830,10 +1830,10 @@ impl ::protobuf::Message for Sym {
             my_size += ::protobuf::rt::string_size(1, &v);
         }
         if let Some(v) = self.value {
-            my_size += ::protobuf::rt::uint64_size(2, v);
+            my_size += ::protobuf::rt::int64_size(2, v);
         }
         if let Some(v) = self.size {
-            my_size += ::protobuf::rt::uint64_size(3, v);
+            my_size += ::protobuf::rt::int64_size(3, v);
         }
         if let Some(v) = self.type_ {
             my_size += ::protobuf::rt::int32_size(4, v.value());
@@ -1857,10 +1857,10 @@ impl ::protobuf::Message for Sym {
             os.write_string(1, v)?;
         }
         if let Some(v) = self.value {
-            os.write_uint64(2, v)?;
+            os.write_int64(2, v)?;
         }
         if let Some(v) = self.size {
-            os.write_uint64(3, v)?;
+            os.write_int64(3, v)?;
         }
         if let Some(v) = self.type_ {
             os.write_enum(4, ::protobuf::EnumOrUnknown::value(&v))?;
@@ -1940,7 +1940,7 @@ pub struct Dyn {
     // @@protoc_insertion_point(field:elf.Dyn.type)
     pub type_: ::std::option::Option<::protobuf::EnumOrUnknown<DynType>>,
     // @@protoc_insertion_point(field:elf.Dyn.val)
-    pub val: ::std::option::Option<u64>,
+    pub val: ::std::option::Option<i64>,
     // special fields
     // @@protoc_insertion_point(special_field:elf.Dyn.special_fields)
     pub special_fields: ::protobuf::SpecialFields,
@@ -1979,9 +1979,9 @@ impl Dyn {
         self.type_ = ::std::option::Option::Some(::protobuf::EnumOrUnknown::new(v));
     }
 
-    // optional uint64 val = 2;
+    // optional int64 val = 2;
 
-    pub fn val(&self) -> u64 {
+    pub fn val(&self) -> i64 {
         self.val.unwrap_or(0)
     }
 
@@ -1994,7 +1994,7 @@ impl Dyn {
     }
 
     // Param is passed by value, moved
-    pub fn set_val(&mut self, v: u64) {
+    pub fn set_val(&mut self, v: i64) {
         self.val = ::std::option::Option::Some(v);
     }
 
@@ -2033,7 +2033,7 @@ impl ::protobuf::Message for Dyn {
                     self.type_ = ::std::option::Option::Some(is.read_enum_or_unknown()?);
                 },
                 16 => {
-                    self.val = ::std::option::Option::Some(is.read_uint64()?);
+                    self.val = ::std::option::Option::Some(is.read_int64()?);
                 },
                 tag => {
                     ::protobuf::rt::read_unknown_or_skip_group(tag, is, self.special_fields.mut_unknown_fields())?;
@@ -2051,7 +2051,7 @@ impl ::protobuf::Message for Dyn {
             my_size += ::protobuf::rt::int32_size(1, v.value());
         }
         if let Some(v) = self.val {
-            my_size += ::protobuf::rt::uint64_size(2, v);
+            my_size += ::protobuf::rt::int64_size(2, v);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.special_fields.unknown_fields());
         self.special_fields.cached_size().set(my_size as u32);
@@ -2063,7 +2063,7 @@ impl ::protobuf::Message for Dyn {
             os.write_enum(1, ::protobuf::EnumOrUnknown::value(&v))?;
         }
         if let Some(v) = self.val {
-            os.write_uint64(2, v)?;
+            os.write_int64(2, v)?;
         }
         os.write_unknown_fields(self.special_fields.unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -2234,16 +2234,36 @@ pub enum Machine {
     EM_S370 = 9,
     // @@protoc_insertion_point(enum_value:elf.Machine.EM_MIPS_RS3_LE)
     EM_MIPS_RS3_LE = 10,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_PARISC)
+    EM_PARISC = 15,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_SPARC32PLUS)
+    EM_SPARC32PLUS = 18,
     // @@protoc_insertion_point(enum_value:elf.Machine.EM_PPC)
     EM_PPC = 20,
     // @@protoc_insertion_point(enum_value:elf.Machine.EM_PPC64)
     EM_PPC64 = 21,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_S390)
+    EM_S390 = 22,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_MCORE)
+    EM_MCORE = 39,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_RCE)
+    EM_RCE = 65575,
     // @@protoc_insertion_point(enum_value:elf.Machine.EM_ARM)
     EM_ARM = 40,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_SH)
+    EM_SH = 42,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_SPARCV9)
+    EM_SPARCV9 = 43,
     // @@protoc_insertion_point(enum_value:elf.Machine.EM_X86_64)
     EM_X86_64 = 62,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_ARC_COMPACT)
+    EM_ARC_COMPACT = 93,
     // @@protoc_insertion_point(enum_value:elf.Machine.EM_AARCH64)
     EM_AARCH64 = 183,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_BPF)
+    EM_BPF = 247,
+    // @@protoc_insertion_point(enum_value:elf.Machine.EM_LOONGARCH)
+    EM_LOONGARCH = 258,
 }
 
 impl ::protobuf::Enum for Machine {
@@ -2266,11 +2286,21 @@ impl ::protobuf::Enum for Machine {
             8 => ::std::option::Option::Some(Machine::EM_MIPS),
             9 => ::std::option::Option::Some(Machine::EM_S370),
             10 => ::std::option::Option::Some(Machine::EM_MIPS_RS3_LE),
+            15 => ::std::option::Option::Some(Machine::EM_PARISC),
+            18 => ::std::option::Option::Some(Machine::EM_SPARC32PLUS),
             20 => ::std::option::Option::Some(Machine::EM_PPC),
             21 => ::std::option::Option::Some(Machine::EM_PPC64),
+            22 => ::std::option::Option::Some(Machine::EM_S390),
+            39 => ::std::option::Option::Some(Machine::EM_MCORE),
+            65575 => ::std::option::Option::Some(Machine::EM_RCE),
             40 => ::std::option::Option::Some(Machine::EM_ARM),
+            42 => ::std::option::Option::Some(Machine::EM_SH),
+            43 => ::std::option::Option::Some(Machine::EM_SPARCV9),
             62 => ::std::option::Option::Some(Machine::EM_X86_64),
+            93 => ::std::option::Option::Some(Machine::EM_ARC_COMPACT),
             183 => ::std::option::Option::Some(Machine::EM_AARCH64),
+            247 => ::std::option::Option::Some(Machine::EM_BPF),
+            258 => ::std::option::Option::Some(Machine::EM_LOONGARCH),
             _ => ::std::option::Option::None
         }
     }
@@ -2288,11 +2318,21 @@ impl ::protobuf::Enum for Machine {
             "EM_MIPS" => ::std::option::Option::Some(Machine::EM_MIPS),
             "EM_S370" => ::std::option::Option::Some(Machine::EM_S370),
             "EM_MIPS_RS3_LE" => ::std::option::Option::Some(Machine::EM_MIPS_RS3_LE),
+            "EM_PARISC" => ::std::option::Option::Some(Machine::EM_PARISC),
+            "EM_SPARC32PLUS" => ::std::option::Option::Some(Machine::EM_SPARC32PLUS),
             "EM_PPC" => ::std::option::Option::Some(Machine::EM_PPC),
             "EM_PPC64" => ::std::option::Option::Some(Machine::EM_PPC64),
+            "EM_S390" => ::std::option::Option::Some(Machine::EM_S390),
+            "EM_MCORE" => ::std::option::Option::Some(Machine::EM_MCORE),
+            "EM_RCE" => ::std::option::Option::Some(Machine::EM_RCE),
             "EM_ARM" => ::std::option::Option::Some(Machine::EM_ARM),
+            "EM_SH" => ::std::option::Option::Some(Machine::EM_SH),
+            "EM_SPARCV9" => ::std::option::Option::Some(Machine::EM_SPARCV9),
             "EM_X86_64" => ::std::option::Option::Some(Machine::EM_X86_64),
+            "EM_ARC_COMPACT" => ::std::option::Option::Some(Machine::EM_ARC_COMPACT),
             "EM_AARCH64" => ::std::option::Option::Some(Machine::EM_AARCH64),
+            "EM_BPF" => ::std::option::Option::Some(Machine::EM_BPF),
+            "EM_LOONGARCH" => ::std::option::Option::Some(Machine::EM_LOONGARCH),
             _ => ::std::option::Option::None
         }
     }
@@ -2309,11 +2349,21 @@ impl ::protobuf::Enum for Machine {
         Machine::EM_MIPS,
         Machine::EM_S370,
         Machine::EM_MIPS_RS3_LE,
+        Machine::EM_PARISC,
+        Machine::EM_SPARC32PLUS,
         Machine::EM_PPC,
         Machine::EM_PPC64,
+        Machine::EM_S390,
+        Machine::EM_MCORE,
+        Machine::EM_RCE,
         Machine::EM_ARM,
+        Machine::EM_SH,
+        Machine::EM_SPARCV9,
         Machine::EM_X86_64,
+        Machine::EM_ARC_COMPACT,
         Machine::EM_AARCH64,
+        Machine::EM_BPF,
+        Machine::EM_LOONGARCH,
     ];
 }
 
@@ -2336,11 +2386,21 @@ impl ::protobuf::EnumFull for Machine {
             Machine::EM_MIPS => 8,
             Machine::EM_S370 => 9,
             Machine::EM_MIPS_RS3_LE => 10,
-            Machine::EM_PPC => 11,
-            Machine::EM_PPC64 => 12,
-            Machine::EM_ARM => 13,
-            Machine::EM_X86_64 => 14,
-            Machine::EM_AARCH64 => 15,
+            Machine::EM_PARISC => 11,
+            Machine::EM_SPARC32PLUS => 12,
+            Machine::EM_PPC => 13,
+            Machine::EM_PPC64 => 14,
+            Machine::EM_S390 => 15,
+            Machine::EM_MCORE => 16,
+            Machine::EM_RCE => 17,
+            Machine::EM_ARM => 18,
+            Machine::EM_SH => 19,
+            Machine::EM_SPARCV9 => 20,
+            Machine::EM_X86_64 => 21,
+            Machine::EM_ARC_COMPACT => 22,
+            Machine::EM_AARCH64 => 23,
+            Machine::EM_BPF => 24,
+            Machine::EM_LOONGARCH => 25,
         };
         Self::enum_descriptor().value_by_index(index)
     }
@@ -3443,114 +3503,118 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x04type\x18\x01\x20\x01(\x0e2\t.elf.TypeR\x04type\x12&\n\x07machine\x18\
     \x02\x20\x01(\x0e2\x0c.elf.MachineR\x07machine\x12\x20\n\x05osabi\x18\
     \x12\x20\x01(\x0e2\n.elf.OsAbiR\x05osabi\x12\x1f\n\x0bentry_point\x18\
-    \x03\x20\x01(\x04R\nentryPoint\x12\x1b\n\tsh_offset\x18\x04\x20\x01(\x04\
+    \x03\x20\x01(\x03R\nentryPoint\x12\x1b\n\tsh_offset\x18\x04\x20\x01(\x03\
     R\x08shOffset\x12\"\n\rsh_entry_size\x18\x05\x20\x01(\rR\x0bshEntrySize\
-    \x12\x1b\n\tph_offset\x18\x06\x20\x01(\x04R\x08phOffset\x12\"\n\rph_entr\
+    \x12\x1b\n\tph_offset\x18\x06\x20\x01(\x03R\x08phOffset\x12\"\n\rph_entr\
     y_size\x18\x07\x20\x01(\rR\x0bphEntrySize\x12\x80\x01\n\x12number_of_sec\
-    tions\x18\x08\x20\x01(\x04R\x10numberOfSectionsBR\x82\x93\x19N2L\n\x18th\
+    tions\x18\x08\x20\x01(\x03R\x10numberOfSectionsBR\x82\x93\x19N2L\n\x18th\
     is\x20field\x20is\x20deprecated\x12\x20use\x20`elf.sections.len()`\x20in\
     stead\x1a\x0esections.len()\x12\x80\x01\n\x12number_of_segments\x18\t\
-    \x20\x01(\x04R\x10numberOfSegmentsBR\x82\x93\x19N2L\n\x18this\x20field\
+    \x20\x01(\x03R\x10numberOfSegmentsBR\x82\x93\x19N2L\n\x18this\x20field\
     \x20is\x20deprecated\x12\x20use\x20`elf.segments.len()`\x20instead\x1a\
-    \x0esegments.len()\x12%\n\x0esymtab_entries\x18\n\x20\x01(\x04R\rsymtabE\
-    ntries\x12%\n\x0edynsym_entries\x18\x0b\x20\x01(\x04R\rdynsymEntries\x12\
-    6\n\x17dynamic_section_entries\x18\x0c\x20\x01(\x04R\x15dynamicSectionEn\
+    \x0esegments.len()\x12%\n\x0esymtab_entries\x18\n\x20\x01(\x03R\rsymtabE\
+    ntries\x12%\n\x0edynsym_entries\x18\x0b\x20\x01(\x03R\rdynsymEntries\x12\
+    6\n\x17dynamic_section_entries\x18\x0c\x20\x01(\x03R\x15dynamicSectionEn\
     tries\x12(\n\x08sections\x18\r\x20\x03(\x0b2\x0c.elf.SectionR\x08section\
     s\x12(\n\x08segments\x18\x0e\x20\x03(\x0b2\x0c.elf.SegmentR\x08segments\
     \x12\x20\n\x06symtab\x18\x0f\x20\x03(\x0b2\x08.elf.SymR\x06symtab\x12\
     \x20\n\x06dynsym\x18\x10\x20\x03(\x0b2\x08.elf.SymR\x06dynsym\x12\"\n\
     \x07dynamic\x18\x11\x20\x03(\x0b2\x08.elf.DynR\x07dynamic\"\x9f\x01\n\
     \x07Section\x12$\n\x04type\x18\x01\x20\x02(\x0e2\x10.elf.SectionTypeR\
-    \x04type\x12\x14\n\x05flags\x18\x02\x20\x02(\x04R\x05flags\x12\x18\n\x07\
-    address\x18\x03\x20\x02(\x04R\x07address\x12\x12\n\x04size\x18\x04\x20\
-    \x02(\x04R\x04size\x12\x16\n\x06offset\x18\x05\x20\x02(\x04R\x06offset\
+    \x04type\x12\x14\n\x05flags\x18\x02\x20\x02(\x03R\x05flags\x12\x18\n\x07\
+    address\x18\x03\x20\x02(\x03R\x07address\x12\x12\n\x04size\x18\x04\x20\
+    \x02(\x03R\x04size\x12\x16\n\x06offset\x18\x05\x20\x02(\x03R\x06offset\
     \x12\x12\n\x04name\x18\x06\x20\x01(\tR\x04name\"\xa7\x02\n\x07Segment\
     \x12$\n\x04type\x18\x01\x20\x02(\x0e2\x10.elf.SegmentTypeR\x04type\x12.\
     \n\x05flags\x18\x02\x20\x02(\rR\x05flagsB\x18\x82\x93\x19\x14*\x12flags:\
-    SegmentFlags\x12\x16\n\x06offset\x18\x03\x20\x02(\x04R\x06offset\x12'\n\
-    \x0fvirtual_address\x18\x04\x20\x02(\x04R\x0evirtualAddress\x12)\n\x10ph\
-    ysical_address\x18\x05\x20\x02(\x04R\x0fphysicalAddress\x12\x1b\n\tfile_\
-    size\x18\x06\x20\x02(\x04R\x08fileSize\x12\x1f\n\x0bmemory_size\x18\x07\
-    \x20\x02(\x04R\nmemorySize\x12\x1c\n\talignment\x18\x08\x20\x02(\x04R\ta\
+    SegmentFlags\x12\x16\n\x06offset\x18\x03\x20\x02(\x03R\x06offset\x12'\n\
+    \x0fvirtual_address\x18\x04\x20\x02(\x03R\x0evirtualAddress\x12)\n\x10ph\
+    ysical_address\x18\x05\x20\x02(\x03R\x0fphysicalAddress\x12\x1b\n\tfile_\
+    size\x18\x06\x20\x02(\x03R\x08fileSize\x12\x1f\n\x0bmemory_size\x18\x07\
+    \x20\x02(\x03R\nmemorySize\x12\x1c\n\talignment\x18\x08\x20\x02(\x03R\ta\
     lignment\"\xd1\x01\n\x03Sym\x12\x12\n\x04name\x18\x01\x20\x01(\tR\x04nam\
-    e\x12\x14\n\x05value\x18\x02\x20\x02(\x04R\x05value\x12\x12\n\x04size\
-    \x18\x03\x20\x02(\x04R\x04size\x12\x20\n\x04type\x18\x04\x20\x02(\x0e2\
+    e\x12\x14\n\x05value\x18\x02\x20\x02(\x03R\x05value\x12\x12\n\x04size\
+    \x18\x03\x20\x02(\x03R\x04size\x12\x20\n\x04type\x18\x04\x20\x02(\x0e2\
     \x0c.elf.SymTypeR\x04type\x12\x20\n\x04bind\x18\x05\x20\x02(\x0e2\x0c.el\
     f.SymBindR\x04bind\x12\x14\n\x05shndx\x18\x06\x20\x02(\rR\x05shndx\x122\
     \n\nvisibility\x18\x07\x20\x02(\x0e2\x12.elf.SymVisibilityR\nvisibility\
     \"9\n\x03Dyn\x12\x20\n\x04type\x18\x01\x20\x01(\x0e2\x0c.elf.DynTypeR\
-    \x04type\x12\x10\n\x03val\x18\x02\x20\x01(\x04R\x03val*n\n\x04Type\x12\
+    \x04type\x12\x10\n\x03val\x18\x02\x20\x01(\x03R\x03val*n\n\x04Type\x12\
     \x0b\n\x07ET_NONE\x10\0\x12\n\n\x06ET_REL\x10\x01\x12\x0b\n\x07ET_EXEC\
     \x10\x02\x12\n\n\x06ET_DYN\x10\x03\x12\x0b\n\x07ET_CORE\x10\x04\x12\x0f\
     \n\tET_LOPROC\x10\x80\xfe\x03\x12\x0e\n\tET_HIPROC\x10\xff\x01\x1a\x06\
-    \x92\x93\x19\x02\x10\x01*\xea\x01\n\x07Machine\x12\x0b\n\x07EM_NONE\x10\
+    \x92\x93\x19\x02\x10\x01*\x8d\x03\n\x07Machine\x12\x0b\n\x07EM_NONE\x10\
     \0\x12\n\n\x06EM_M32\x10\x01\x12\x0c\n\x08EM_SPARC\x10\x02\x12\n\n\x06EM\
     _386\x10\x03\x12\n\n\x06EM_68K\x10\x04\x12\n\n\x06EM_88K\x10\x05\x12\x0c\
     \n\x08EM_IAMCU\x10\x06\x12\n\n\x06EM_860\x10\x07\x12\x0b\n\x07EM_MIPS\
     \x10\x08\x12\x0b\n\x07EM_S370\x10\t\x12\x12\n\x0eEM_MIPS_RS3_LE\x10\n\
-    \x12\n\n\x06EM_PPC\x10\x14\x12\x0c\n\x08EM_PPC64\x10\x15\x12\n\n\x06EM_A\
-    RM\x10(\x12\r\n\tEM_X86_64\x10>\x12\x0f\n\nEM_AARCH64\x10\xb7\x01\x1a\
-    \x06\x92\x93\x19\x02\x10\x01*\x8a\x03\n\x05OsAbi\x12\x0e\n\nOSABI_NONE\
-    \x10\0\x12\x0e\n\nOSABI_HPUX\x10\x01\x12\x10\n\x0cOSABI_NETBSD\x10\x02\
-    \x12\x0f\n\x0bOSABI_LINUX\x10\x03\x12\x12\n\x0eOSABI_GNU_HURD\x10\x04\
-    \x12\x11\n\rOSABI_SOLARIS\x10\x06\x12\r\n\tOSABI_AIX\x10\x07\x12\x0e\n\n\
-    OSABI_IRIX\x10\x08\x12\x12\n\x0eOSABI_FREE_BSD\x10\t\x12\x0f\n\x0bOSABI_\
-    TRU64\x10\n\x12\x11\n\rOSABI_MODESTO\x10\x0b\x12\x11\n\rOSABI_OPENBSD\
-    \x10\x0c\x12\x11\n\rOSABI_OPENVMS\x10\r\x12\r\n\tOSABI_NSK\x10\x0e\x12\
-    \x0e\n\nOSABI_AROS\x10\x0f\x12\x11\n\rOSABI_FENIXOS\x10\x10\x12\x12\n\
-    \x0eOSABI_CLOUDABI\x10\x11\x12\x11\n\rOSABI_OPENVOS\x10\x12\x12\x13\n\
-    \x0fOSABI_ARM_AEABI\x10@\x12\r\n\tOSABI_ARM\x10a\x12\x15\n\x10OSABI_STAN\
-    DALONE\x10\xff\x01\x1a\x06\x92\x93\x19\x02\x10\x01*\xf4\x01\n\x0bSection\
-    Type\x12\x0c\n\x08SHT_NULL\x10\0\x12\x10\n\x0cSHT_PROGBITS\x10\x01\x12\
-    \x0e\n\nSHT_SYMTAB\x10\x02\x12\x0e\n\nSHT_STRTAB\x10\x03\x12\x0c\n\x08SH\
-    T_RELA\x10\x04\x12\x0c\n\x08SHT_HASH\x10\x05\x12\x0f\n\x0bSHT_DYNAMIC\
-    \x10\x06\x12\x0c\n\x08SHT_NOTE\x10\x07\x12\x0e\n\nSHT_NOBITS\x10\x08\x12\
-    \x0b\n\x07SHT_REL\x10\t\x12\r\n\tSHT_SHLIB\x10\n\x12\x0e\n\nSHT_DYNSYM\
-    \x10\x0b\x12\x12\n\x0eSHT_INIT_ARRAY\x10\x0e\x12\x12\n\x0eSHT_FINI_ARRAY\
-    \x10\x0f\x1a\x06\x92\x93\x19\x02\x10\x01*\xe0\x01\n\x0bSegmentType\x12\
-    \x0b\n\x07PT_NULL\x10\0\x12\x0b\n\x07PT_LOAD\x10\x01\x12\x0e\n\nPT_DYNAM\
-    IC\x10\x02\x12\r\n\tPT_INTERP\x10\x03\x12\x0b\n\x07PT_NOTE\x10\x04\x12\
-    \x0c\n\x08PT_SHLIB\x10\x05\x12\x0b\n\x07PT_PHDR\x10\x06\x12\n\n\x06PT_TL\
-    S\x10\x07\x12\x17\n\x0fPT_GNU_EH_FRAME\x10\xd0\xca\xd3\xa3\x06\x12\x14\n\
-    \x0cPT_GNU_STACK\x10\xd1\xca\xd3\xa3\x06\x12\x14\n\x0cPT_GNU_RELRO\x10\
-    \xd2\xca\xd3\xa3\x06\x12\x17\n\x0fPT_GNU_PROPERTY\x10\xd3\xca\xd3\xa3\
-    \x06\x1a\x06\x92\x93\x19\x02\x10\x01*4\n\x0cSegmentFlags\x12\x08\n\x04PF\
-    _X\x10\x01\x12\x08\n\x04PF_W\x10\x02\x12\x08\n\x04PF_R\x10\x04\x1a\x06\
-    \x92\x93\x19\x02\x10\x01*{\n\x07SymType\x12\x0e\n\nSTT_NOTYPE\x10\0\x12\
-    \x0e\n\nSTT_OBJECT\x10\x01\x12\x0c\n\x08STT_FUNC\x10\x02\x12\x0f\n\x0bST\
-    T_SECTION\x10\x03\x12\x0c\n\x08STT_FILE\x10\x04\x12\x0e\n\nSTT_COMMON\
-    \x10\x05\x12\x0b\n\x07STT_TLS\x10\x06\x1a\x06\x92\x93\x19\x02\x10\x01*>\
-    \n\x07SymBind\x12\r\n\tSTB_LOCAL\x10\0\x12\x0e\n\nSTB_GLOBAL\x10\x01\x12\
-    \x0c\n\x08STB_WEAK\x10\x02\x1a\x06\x92\x93\x19\x02\x10\x01*]\n\rSymVisib\
-    ility\x12\x0f\n\x0bSTV_DEFAULT\x10\0\x12\x10\n\x0cSTV_INTERNAL\x10\x01\
-    \x12\x0e\n\nSTV_HIDDEN\x10\x02\x12\x11\n\rSTV_PROTECTED\x10\x03\x1a\x06\
-    \x92\x93\x19\x02\x10\x01*\xc2\x06\n\x07DynType\x12\x0b\n\x07DT_NULL\x10\
-    \0\x12\r\n\tDT_NEEDED\x10\x01\x12\x0f\n\x0bDT_PLTRELSZ\x10\x02\x12\r\n\t\
-    DT_PLTGOT\x10\x03\x12\x0b\n\x07DT_HASH\x10\x04\x12\r\n\tDT_STRTAB\x10\
-    \x05\x12\r\n\tDT_SYMTAB\x10\x06\x12\x0b\n\x07DT_RELA\x10\x07\x12\r\n\tDT\
-    _RELASZ\x10\x08\x12\x0e\n\nDT_RELAENT\x10\t\x12\x0c\n\x08DT_STRSZ\x10\n\
-    \x12\r\n\tDT_SYMENT\x10\x0b\x12\x0b\n\x07DT_INIT\x10\x0c\x12\x0b\n\x07DT\
-    _FINI\x10\r\x12\r\n\tDT_SONAME\x10\x0e\x12\x0c\n\x08DT_RPATH\x10\x0f\x12\
-    \x0f\n\x0bDT_SYMBOLIC\x10\x10\x12\n\n\x06DT_REL\x10\x11\x12\x0c\n\x08DT_\
-    RELSZ\x10\x12\x12\r\n\tDT_RELENT\x10\x13\x12\r\n\tDT_PLTREL\x10\x14\x12\
-    \x0c\n\x08DT_DEBUG\x10\x15\x12\x0e\n\nDT_TEXTREL\x10\x16\x12\r\n\tDT_JMP\
-    REL\x10\x17\x12\x0f\n\x0bDT_BIND_NOW\x10\x18\x12\x11\n\rDT_INIT_ARRAY\
-    \x10\x19\x12\x11\n\rDT_FINI_ARRAY\x10\x1a\x12\x13\n\x0fDT_INIT_ARRAYSZ\
-    \x10\x1b\x12\x13\n\x0fDT_FINI_ARRAYSZ\x10\x1c\x12\x0e\n\nDT_RUNPATH\x10\
-    \x1d\x12\x0c\n\x08DT_FLAGS\x10\x1e\x12\x0f\n\x0bDT_ENCODING\x10\x20\x12\
-    \x0f\n\x07DT_LOOS\x10\x8d\x80\x80\x80\x06\x12\x0f\n\x07DT_HIOS\x10\x80\
-    \xe0\xff\xff\x06\x12\x13\n\x0bDT_VALRNGLO\x10\x80\xfa\xff\xff\x06\x12\
-    \x13\n\x0bDT_VALRNGHI\x10\xff\xfb\xff\xff\x06\x12\x14\n\x0cDT_ADDRRNGLO\
-    \x10\x80\xfc\xff\xff\x06\x12\x14\n\x0cDT_ADDRRNGHI\x10\xff\xfd\xff\xff\
-    \x06\x12\x11\n\tDT_VERSYM\x10\xf0\xff\xff\xff\x06\x12\x14\n\x0cDT_RELACO\
-    UNT\x10\xf9\xff\xff\xff\x06\x12\x13\n\x0bDT_RELCOUNT\x10\xfa\xff\xff\xff\
-    \x06\x12\x12\n\nDT_FLAGS_1\x10\xfb\xff\xff\xff\x06\x12\x11\n\tDT_VERDEF\
-    \x10\xfc\xff\xff\xff\x06\x12\x14\n\x0cDT_VERDEFNUM\x10\xfd\xff\xff\xff\
-    \x06\x12\x12\n\nDT_VERNEED\x10\xfe\xff\xff\xff\x06\x12\x15\n\rDT_VERNEED\
-    NUM\x10\xff\xff\xff\xff\x06\x12\x11\n\tDT_LOPROC\x10\x80\x80\x80\x80\x07\
-    \x12\x11\n\tDT_HIPROC\x10\xff\xff\xff\xff\x07\x1a\x06\x92\x93\x19\x02\
-    \x10\x01B\x1e\xfa\x92\x19\x1a\n\x03elf\x12\x07elf.ELF\x1a\nelf-moduleb\
-    \x06proto2\
+    \x12\r\n\tEM_PARISC\x10\x0f\x12\x12\n\x0eEM_SPARC32PLUS\x10\x12\x12\n\n\
+    \x06EM_PPC\x10\x14\x12\x0c\n\x08EM_PPC64\x10\x15\x12\x0b\n\x07EM_S390\
+    \x10\x16\x12\x0c\n\x08EM_MCORE\x10'\x12\x14\n\x06EM_RCE\x10\xa7\x80\x04\
+    \x1a\x06\x9a\x93\x19\x02\x08'\x12\n\n\x06EM_ARM\x10(\x12\t\n\x05EM_SH\
+    \x10*\x12\x0e\n\nEM_SPARCV9\x10+\x12\r\n\tEM_X86_64\x10>\x12\x12\n\x0eEM\
+    _ARC_COMPACT\x10]\x12\x0f\n\nEM_AARCH64\x10\xb7\x01\x12\x0b\n\x06EM_BPF\
+    \x10\xf7\x01\x12\x11\n\x0cEM_LOONGARCH\x10\x82\x02\x1a\x06\x92\x93\x19\
+    \x02\x10\x01*\x8a\x03\n\x05OsAbi\x12\x0e\n\nOSABI_NONE\x10\0\x12\x0e\n\n\
+    OSABI_HPUX\x10\x01\x12\x10\n\x0cOSABI_NETBSD\x10\x02\x12\x0f\n\x0bOSABI_\
+    LINUX\x10\x03\x12\x12\n\x0eOSABI_GNU_HURD\x10\x04\x12\x11\n\rOSABI_SOLAR\
+    IS\x10\x06\x12\r\n\tOSABI_AIX\x10\x07\x12\x0e\n\nOSABI_IRIX\x10\x08\x12\
+    \x12\n\x0eOSABI_FREE_BSD\x10\t\x12\x0f\n\x0bOSABI_TRU64\x10\n\x12\x11\n\
+    \rOSABI_MODESTO\x10\x0b\x12\x11\n\rOSABI_OPENBSD\x10\x0c\x12\x11\n\rOSAB\
+    I_OPENVMS\x10\r\x12\r\n\tOSABI_NSK\x10\x0e\x12\x0e\n\nOSABI_AROS\x10\x0f\
+    \x12\x11\n\rOSABI_FENIXOS\x10\x10\x12\x12\n\x0eOSABI_CLOUDABI\x10\x11\
+    \x12\x11\n\rOSABI_OPENVOS\x10\x12\x12\x13\n\x0fOSABI_ARM_AEABI\x10@\x12\
+    \r\n\tOSABI_ARM\x10a\x12\x15\n\x10OSABI_STANDALONE\x10\xff\x01\x1a\x06\
+    \x92\x93\x19\x02\x10\x01*\xf4\x01\n\x0bSectionType\x12\x0c\n\x08SHT_NULL\
+    \x10\0\x12\x10\n\x0cSHT_PROGBITS\x10\x01\x12\x0e\n\nSHT_SYMTAB\x10\x02\
+    \x12\x0e\n\nSHT_STRTAB\x10\x03\x12\x0c\n\x08SHT_RELA\x10\x04\x12\x0c\n\
+    \x08SHT_HASH\x10\x05\x12\x0f\n\x0bSHT_DYNAMIC\x10\x06\x12\x0c\n\x08SHT_N\
+    OTE\x10\x07\x12\x0e\n\nSHT_NOBITS\x10\x08\x12\x0b\n\x07SHT_REL\x10\t\x12\
+    \r\n\tSHT_SHLIB\x10\n\x12\x0e\n\nSHT_DYNSYM\x10\x0b\x12\x12\n\x0eSHT_INI\
+    T_ARRAY\x10\x0e\x12\x12\n\x0eSHT_FINI_ARRAY\x10\x0f\x1a\x06\x92\x93\x19\
+    \x02\x10\x01*\xe0\x01\n\x0bSegmentType\x12\x0b\n\x07PT_NULL\x10\0\x12\
+    \x0b\n\x07PT_LOAD\x10\x01\x12\x0e\n\nPT_DYNAMIC\x10\x02\x12\r\n\tPT_INTE\
+    RP\x10\x03\x12\x0b\n\x07PT_NOTE\x10\x04\x12\x0c\n\x08PT_SHLIB\x10\x05\
+    \x12\x0b\n\x07PT_PHDR\x10\x06\x12\n\n\x06PT_TLS\x10\x07\x12\x17\n\x0fPT_\
+    GNU_EH_FRAME\x10\xd0\xca\xd3\xa3\x06\x12\x14\n\x0cPT_GNU_STACK\x10\xd1\
+    \xca\xd3\xa3\x06\x12\x14\n\x0cPT_GNU_RELRO\x10\xd2\xca\xd3\xa3\x06\x12\
+    \x17\n\x0fPT_GNU_PROPERTY\x10\xd3\xca\xd3\xa3\x06\x1a\x06\x92\x93\x19\
+    \x02\x10\x01*4\n\x0cSegmentFlags\x12\x08\n\x04PF_X\x10\x01\x12\x08\n\x04\
+    PF_W\x10\x02\x12\x08\n\x04PF_R\x10\x04\x1a\x06\x92\x93\x19\x02\x10\x01*{\
+    \n\x07SymType\x12\x0e\n\nSTT_NOTYPE\x10\0\x12\x0e\n\nSTT_OBJECT\x10\x01\
+    \x12\x0c\n\x08STT_FUNC\x10\x02\x12\x0f\n\x0bSTT_SECTION\x10\x03\x12\x0c\
+    \n\x08STT_FILE\x10\x04\x12\x0e\n\nSTT_COMMON\x10\x05\x12\x0b\n\x07STT_TL\
+    S\x10\x06\x1a\x06\x92\x93\x19\x02\x10\x01*>\n\x07SymBind\x12\r\n\tSTB_LO\
+    CAL\x10\0\x12\x0e\n\nSTB_GLOBAL\x10\x01\x12\x0c\n\x08STB_WEAK\x10\x02\
+    \x1a\x06\x92\x93\x19\x02\x10\x01*]\n\rSymVisibility\x12\x0f\n\x0bSTV_DEF\
+    AULT\x10\0\x12\x10\n\x0cSTV_INTERNAL\x10\x01\x12\x0e\n\nSTV_HIDDEN\x10\
+    \x02\x12\x11\n\rSTV_PROTECTED\x10\x03\x1a\x06\x92\x93\x19\x02\x10\x01*\
+    \xc2\x06\n\x07DynType\x12\x0b\n\x07DT_NULL\x10\0\x12\r\n\tDT_NEEDED\x10\
+    \x01\x12\x0f\n\x0bDT_PLTRELSZ\x10\x02\x12\r\n\tDT_PLTGOT\x10\x03\x12\x0b\
+    \n\x07DT_HASH\x10\x04\x12\r\n\tDT_STRTAB\x10\x05\x12\r\n\tDT_SYMTAB\x10\
+    \x06\x12\x0b\n\x07DT_RELA\x10\x07\x12\r\n\tDT_RELASZ\x10\x08\x12\x0e\n\n\
+    DT_RELAENT\x10\t\x12\x0c\n\x08DT_STRSZ\x10\n\x12\r\n\tDT_SYMENT\x10\x0b\
+    \x12\x0b\n\x07DT_INIT\x10\x0c\x12\x0b\n\x07DT_FINI\x10\r\x12\r\n\tDT_SON\
+    AME\x10\x0e\x12\x0c\n\x08DT_RPATH\x10\x0f\x12\x0f\n\x0bDT_SYMBOLIC\x10\
+    \x10\x12\n\n\x06DT_REL\x10\x11\x12\x0c\n\x08DT_RELSZ\x10\x12\x12\r\n\tDT\
+    _RELENT\x10\x13\x12\r\n\tDT_PLTREL\x10\x14\x12\x0c\n\x08DT_DEBUG\x10\x15\
+    \x12\x0e\n\nDT_TEXTREL\x10\x16\x12\r\n\tDT_JMPREL\x10\x17\x12\x0f\n\x0bD\
+    T_BIND_NOW\x10\x18\x12\x11\n\rDT_INIT_ARRAY\x10\x19\x12\x11\n\rDT_FINI_A\
+    RRAY\x10\x1a\x12\x13\n\x0fDT_INIT_ARRAYSZ\x10\x1b\x12\x13\n\x0fDT_FINI_A\
+    RRAYSZ\x10\x1c\x12\x0e\n\nDT_RUNPATH\x10\x1d\x12\x0c\n\x08DT_FLAGS\x10\
+    \x1e\x12\x0f\n\x0bDT_ENCODING\x10\x20\x12\x0f\n\x07DT_LOOS\x10\x8d\x80\
+    \x80\x80\x06\x12\x0f\n\x07DT_HIOS\x10\x80\xe0\xff\xff\x06\x12\x13\n\x0bD\
+    T_VALRNGLO\x10\x80\xfa\xff\xff\x06\x12\x13\n\x0bDT_VALRNGHI\x10\xff\xfb\
+    \xff\xff\x06\x12\x14\n\x0cDT_ADDRRNGLO\x10\x80\xfc\xff\xff\x06\x12\x14\n\
+    \x0cDT_ADDRRNGHI\x10\xff\xfd\xff\xff\x06\x12\x11\n\tDT_VERSYM\x10\xf0\
+    \xff\xff\xff\x06\x12\x14\n\x0cDT_RELACOUNT\x10\xf9\xff\xff\xff\x06\x12\
+    \x13\n\x0bDT_RELCOUNT\x10\xfa\xff\xff\xff\x06\x12\x12\n\nDT_FLAGS_1\x10\
+    \xfb\xff\xff\xff\x06\x12\x11\n\tDT_VERDEF\x10\xfc\xff\xff\xff\x06\x12\
+    \x14\n\x0cDT_VERDEFNUM\x10\xfd\xff\xff\xff\x06\x12\x12\n\nDT_VERNEED\x10\
+    \xfe\xff\xff\xff\x06\x12\x15\n\rDT_VERNEEDNUM\x10\xff\xff\xff\xff\x06\
+    \x12\x11\n\tDT_LOPROC\x10\x80\x80\x80\x80\x07\x12\x11\n\tDT_HIPROC\x10\
+    \xff\xff\xff\xff\x07\x1a\x06\x92\x93\x19\x02\x10\x01B\x1e\xfa\x92\x19\
+    \x1a\n\x03elf\x12\x07elf.ELF\x1a\nelf-moduleb\x06proto2\
 ";
 
 /// `FileDescriptorProto` object which was a source for this generated file

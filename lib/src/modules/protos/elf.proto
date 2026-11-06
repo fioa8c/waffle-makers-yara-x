@@ -18,36 +18,36 @@ message ELF {
   optional OsAbi osabi = 18;
 
   // Entry point address of the executable.
-  optional uint64 entry_point = 3;
+  optional int64 entry_point = 3;
   // File offset pointing to the section header table.
-  optional uint64 sh_offset = 4;
+  optional int64 sh_offset = 4;
   // Size in bytes of a single section header entry.
   optional uint32 sh_entry_size = 5;
   // File offset pointing to the program header table.
-  optional uint64 ph_offset = 6;
+  optional int64 ph_offset = 6;
   // Size in bytes of a single program header entry.
   optional uint32 ph_entry_size = 7;
 
   // Number of section header entries in the table.
-  optional uint64 number_of_sections = 8  [(yara.field_options).deprecation_notice = {
+  optional int64 number_of_sections = 8  [(yara.field_options).deprecation_notice = {
     text: "this field is deprecated",
     help: "use `elf.sections.len()` instead",
     replacement: "sections.len()"
   }];
 
   // Number of program header entries in the table.
-  optional uint64 number_of_segments = 9 [(yara.field_options).deprecation_notice = {
+  optional int64 number_of_segments = 9 [(yara.field_options).deprecation_notice = {
     text: "this field is deprecated",
     help: "use `elf.segments.len()` instead",
     replacement: "segments.len()"
   }];
 
   // Count of symbols stored in the static symbol table.
-  optional uint64 symtab_entries = 10;
+  optional int64 symtab_entries = 10;
   // Count of symbols stored in the dynamic symbol table.
-  optional uint64 dynsym_entries = 11;
+  optional int64 dynsym_entries = 11;
   // Count of entries present in the dynamic linking section.
-  optional uint64 dynamic_section_entries = 12;
+  optional int64 dynamic_section_entries = 12;
 
   // Array of sections described by the section header table.
   repeated Section sections = 13;
@@ -85,11 +85,23 @@ enum Machine {
   EM_MIPS = 8;         // 0x0008 MIPS I Architecture
   EM_S370 = 9;         // 0x0009 IBM S370
   EM_MIPS_RS3_LE = 10; // 0x000A MIPS RS3000 Little-endian
+  EM_PARISC = 15;      // 0x000F HP PA-RISC
+  EM_SPARC32PLUS = 18; // 0x0012 Sun's "v8plus"
   EM_PPC = 20;         // 0x0014 PowerPC
   EM_PPC64 = 21;       // 0x0015 64-bit PowerPC
+  EM_S390 = 22;        // 0x0016 IBM S/390
+  EM_MCORE = 39;       // 0x0027 Motorola M*Core.
+  // EM_RCE was the original name for EM_MCORE and is still what some
+  // toolchains emit. Same value, exposed so either name works in a rule.
+  EM_RCE = 0x10027 [(yara.enum_value).i64 = 39];
   EM_ARM = 40;         // 0x0028 ARM
+  EM_SH = 42;          // 0x002A Renesas (formerly Hitachi) SuperH
+  EM_SPARCV9 = 43;     // 0x002B 64-bit SPARC v9
   EM_X86_64 = 62;      // 0x003E AMD/Intel x86_64
+  EM_ARC_COMPACT = 93; // 0x005D ARC International ARCompact
   EM_AARCH64 = 183;    // 0x00B7 64-bit ARM
+  EM_BPF = 247;        // 0x00F7 Linux BPF in-kernel virtual machine
+  EM_LOONGARCH = 258;  // 0x0102 LoongArch
 }
 
 enum OsAbi {
@@ -121,13 +133,13 @@ message Section {
   // Section type classification (e.g., PROGBITS, SYMTAB).
   required SectionType type = 1;
   // Section attributes represented as bitwise flags.
-  required uint64 flags = 2;
+  required int64 flags = 2;
   // Virtual address where the section resides in memory.
-  required uint64 address = 3;
+  required int64 address = 3;
   // Size in bytes of the section data.
-  required uint64 size = 4;
+  required int64 size = 4;
   // Physical file offset pointing to the section contents.
-  required uint64 offset = 5;
+  required int64 offset = 5;
   // Name of the section as a string.
   optional string name = 6;
 }
@@ -156,17 +168,17 @@ message Segment {
   // Access permissions and flags of the segment.
   required uint32 flags = 2 [(yara.field_options).fmt = "flags:SegmentFlags"];
   // Physical file offset pointing to the beginning of the segment.
-  required uint64 offset = 3;
+  required int64 offset = 3;
   // Virtual address where the segment is loaded in memory.
-  required uint64 virtual_address = 4;
+  required int64 virtual_address = 4;
   // Physical address of the segment, used on systems without virtual memory.
-  required uint64 physical_address = 5;
+  required int64 physical_address = 5;
   // Size of the segment inside the file.
-  required uint64 file_size = 6;
+  required int64 file_size = 6;
   // Size of the segment when mapped into memory.
-  required uint64 memory_size = 7;
+  required int64 memory_size = 7;
   // Required alignment boundary of the segment in memory and on disk.
-  required uint64 alignment = 8;
+  required int64 alignment = 8;
 }
 
 enum SegmentType {
@@ -196,9 +208,9 @@ message Sym {
   // Name of the symbol as a string.
   optional string name = 1;
   // Value associated with the symbol (typically an address or offset).
-  required uint64 value = 2;
+  required int64 value = 2;
   // Size in bytes of the object referenced by the symbol.
-  required uint64 size = 3;
+  required int64 size = 3;
   // Symbol type classification (e.g., FUNC, OBJECT).
   required SymType type = 4;
   // Binding attributes of the symbol (e.g., GLOBAL, LOCAL).
@@ -239,7 +251,7 @@ message Dyn {
   // Classification type of the dynamic entry (e.g., NEEDED, STRTAB).
   optional DynType type = 1;
   // Value or address associated with the dynamic entry.
-  optional uint64 val = 2;
+  optional int64 val = 2;
 }
 
 enum DynType {

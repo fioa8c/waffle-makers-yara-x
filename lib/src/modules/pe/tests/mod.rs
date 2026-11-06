@@ -169,6 +169,28 @@ fn imports() {
 }
 
 #[test]
+fn signed_fields() {
+    // This file has no exports. Fields like `number_of_exports` are signed
+    // integers, like in YARA, so subtracting 1 from them produces -1.
+    let pe = create_binary_from_zipped_ihex(
+        "src/modules/pe/tests/testdata/2775d97f8bdb3311ace960a42eee35dbec84b9d71a6abbacb26c14e83f5897e4.in.zip",
+    );
+
+    rule_true!(
+        r#"
+        import "pe"
+        rule test {
+          condition:
+            pe.number_of_exports - 1 == -1 and
+            pe.number_of_exports - 1 < 10 and
+            not for any i in (0..pe.number_of_exports - 1) : (true)
+        }
+        "#,
+        &pe
+    );
+}
+
+#[test]
 fn import_rva() {
     let pe = create_binary_from_zipped_ihex(
         "src/modules/pe/tests/testdata/0ba6042247d90a187919dd88dc2d55cd882c80e5afc511c4f7b2e0e193968f7f.in.zip",
@@ -482,6 +504,29 @@ fn rva_to_offset() {
           condition:
             pe.rva_to_offset(4096) == 1024 and 
             pe.rva_to_offset(20481) == 17409
+        }
+        "#,
+        &pe
+    );
+}
+
+#[test]
+fn offset_to_rva() {
+    let pe = create_binary_from_zipped_ihex(
+        "src/modules/pe/tests/testdata/c6f9709feccf42f2d9e22057182fe185f177fb9daaa2649b4669a24f2ee7e3ba.in.zip",
+    );
+
+    rule_true!(
+        r#"
+        import "pe"
+        rule test {
+          condition:
+            pe.offset_to_rva(0) == 0 and
+            pe.offset_to_rva(512) == 512 and
+            pe.offset_to_rva(1024) == 4096 and
+            pe.offset_to_rva(17409) == 20481 and
+            not defined pe.offset_to_rva(-1) and
+            not defined pe.offset_to_rva(0x40000)
         }
         "#,
         &pe

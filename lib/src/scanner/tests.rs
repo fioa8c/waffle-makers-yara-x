@@ -146,7 +146,18 @@ fn metadata() {
             ("qux", "qux"),
             ("quux", [113, 117, 0, 120])
         ])
+    );
+
+    let rules = crate::compile(
+        b"rule test { meta: raw_nul = \"qu\0x\" condition: true }".as_slice(),
     )
+    .unwrap();
+    let mut scanner = Scanner::new(&rules);
+    let results = scanner.scan(b"").expect("scan should not fail");
+    let matching_rule = results.matching_rules().next().unwrap();
+    let metas: Vec<_> = matching_rule.metadata().collect();
+
+    assert_eq!(metas, [("raw_nul", MetaValue::Bytes(b"qu\0x".into()))]);
 }
 
 #[test]
@@ -1238,22 +1249,147 @@ fn regex_set_optimization() {
                 test_proto2.string_foo matches /foo/ or
                 test_proto2.string_foo matches /bar/
         }
+        rule test_eq_true {
+            condition:
+                test_proto2.string_foo == "bar" or
+                test_proto2.string_foo == "foo"
+        }
+        rule test_eq_commuted_true {
+            condition:
+                "bar" == test_proto2.string_foo or
+                "foo" == test_proto2.string_foo
+        }
+        rule test_eq_false_partial {
+            condition:
+                test_proto2.string_foo == "fo" or
+                test_proto2.string_foo == "oo"
+        }
+        rule test_eq_false_case {
+            condition:
+                test_proto2.string_foo == "FOO" or
+                test_proto2.string_foo == "BAR"
+        }
+        rule test_iequals_true {
+            condition:
+                test_proto2.string_foo iequals "BAR" or
+                "FOO" iequals test_proto2.string_foo
+        }
+        rule test_iequals_false_partial {
+            condition:
+                test_proto2.string_foo iequals "FO" or
+                test_proto2.string_foo iequals "OO"
+        }
+        rule test_contains_true {
+            condition:
+                test_proto2.string_foo contains "ba" or
+                test_proto2.string_foo contains "oo"
+        }
+        rule test_contains_false {
+            condition:
+                test_proto2.string_foo contains "FO" or
+                test_proto2.string_foo contains "BA"
+        }
+        rule test_icontains_true {
+            condition:
+                test_proto2.string_foo icontains "BA" or
+                test_proto2.string_foo icontains "OO"
+        }
+        rule test_startswith_true {
+            condition:
+                test_proto2.string_foo startswith "ba" or
+                test_proto2.string_foo startswith "fo"
+        }
+        rule test_startswith_false {
+            condition:
+                test_proto2.string_foo startswith "oo" or
+                test_proto2.string_foo startswith "FO"
+        }
+        rule test_istartswith_true {
+            condition:
+                test_proto2.string_foo istartswith "BA" or
+                test_proto2.string_foo istartswith "FO"
+        }
+        rule test_istartswith_false {
+            condition:
+                test_proto2.string_foo istartswith "OO" or
+                test_proto2.string_foo istartswith "AR"
+        }
+        rule test_endswith_true {
+            condition:
+                test_proto2.string_foo endswith "ar" or
+                test_proto2.string_foo endswith "oo"
+        }
+        rule test_endswith_false {
+            condition:
+                test_proto2.string_foo endswith "fo" or
+                test_proto2.string_foo endswith "OO"
+        }
+        rule test_iendswith_true {
+            condition:
+                test_proto2.string_foo iendswith "AR" or
+                test_proto2.string_foo iendswith "OO"
+        }
+        rule test_iendswith_false {
+            condition:
+                test_proto2.string_foo iendswith "FO" or
+                test_proto2.string_foo iendswith "BA"
+        }
+        rule test_mixed_true {
+            condition:
+                test_proto2.string_foo == "nope" or
+                test_proto2.string_foo startswith "ba" or
+                test_proto2.string_foo matches /b.r/ or
+                test_proto2.string_foo iendswith "OO"
+        }
+        rule test_special_chars_true {
+            condition:
+                test_proto2.head(10) == "other" or
+                test_proto2.head(10) == "a+b/c\nd\x00\xff*"
+        }
+        rule test_special_chars_multiline_anchor_false {
+            condition:
+                test_proto2.head(10) == "a+b/c" or
+                test_proto2.head(10) == "d\x00\xff*"
+        }
+        rule test_undef_false {
+            condition:
+                test_proto2.string_undef == "foo" or
+                test_proto2.string_undef contains "bar"
+        }
         "#,
     )
     .unwrap();
 
     let mut scanner = crate::Scanner::new(&rules);
-    let results = scanner.scan(b"").unwrap();
+    let results = scanner.scan(b"a+b/c\nd\x00\xff*").unwrap();
 
     let matching_rules: Vec<_> =
         results.matching_rules().map(|r| r.identifier().to_string()).collect();
-    assert_eq!(matching_rules, vec!["test_match"]);
+    assert_eq!(
+        matching_rules,
+        vec![
+            "test_match",
+            "test_eq_true",
+            "test_eq_commuted_true",
+            "test_iequals_true",
+            "test_contains_true",
+            "test_icontains_true",
+            "test_startswith_true",
+            "test_istartswith_true",
+            "test_endswith_true",
+            "test_iendswith_true",
+            "test_mixed_true",
+            "test_special_chars_true",
+        ]
+    );
 }
 
 #[test]
 fn fast_scan_mode() {
     let rules = crate::compile(
         r#"
+    import "math"
+
     rule test_boolean {
       strings:
         $a = "foo"
@@ -1261,61 +1397,125 @@ fn fast_scan_mode() {
       condition:
         $a and $b
     }
-    rule test_count {
+    rule test_count_gt {
       strings:
         $c = "baz"
       condition:
-        #c > 1
+        #c > 2
+    }
+    rule test_count_lt {
+      strings:
+        $d = "qux"
+      condition:
+        not (#d < 3)
+    }
+    rule test_count_eq {
+      strings:
+        $e = "zap"
+      condition:
+        #e != 2
+    }
+    rule test_for_of_count {
+      strings:
+        $f = "wim"
+      condition:
+        for any of ($f) : ( # >= 3 )
+    }
+    rule test_unbounded_offset {
+      strings:
+        $g = "nub"
+      condition:
+        @g[1] >= 0
+    }
+    rule test_shared_pattern_fast_scan {
+      strings:
+        $g = "nub"
+      condition:
+        $g
+    }
+    rule test_anchored_and_all_of_them {
+      strings:
+        $j = "$"
+        $k = "foo"
+      condition:
+        all of them and $j at 0
     }
     "#,
     )
     .unwrap();
 
+    let input = b"$foofoobarbarbazbazbazbazquxquxquxquxzapzapzapzapwimwimwimwimnubnubnubnubzenzenzenzenorborborborb$$$";
+
     // Test standard scan first (fast_scan = false by default)
     let mut scanner = Scanner::new(&rules);
-    let results = scanner.scan(b"foofoobarbarbazbaz").unwrap();
+    let results = scanner.scan(input).unwrap();
 
-    // Check pattern $a matches
-    let test_boolean = results
-        .matching_rules()
-        .find(|r| r.identifier() == "test_boolean")
-        .unwrap();
-    let mut patterns_a =
-        test_boolean.patterns().filter(|p| p.identifier() == "$a");
-    assert_eq!(patterns_a.next().unwrap().matches().len(), 2); // foofoo has 2 matches
+    let get_match_count =
+        |results: &crate::ScanResults, rule_name: &str, pat_name: &str| {
+            results
+                .matching_rules()
+                .find(|r| r.identifier() == rule_name)
+                .unwrap()
+                .patterns()
+                .find(|p| p.identifier() == pat_name)
+                .unwrap()
+                .matches()
+                .len()
+        };
 
-    // Check pattern $c matches
-    let test_count = results
-        .matching_rules()
-        .find(|r| r.identifier() == "test_count")
-        .unwrap();
-    let mut patterns_c =
-        test_count.patterns().filter(|p| p.identifier() == "$c");
-    assert_eq!(patterns_c.next().unwrap().matches().len(), 2); // bazbaz has 2 matches
+    assert_eq!(get_match_count(&results, "test_boolean", "$a"), 2);
+    assert_eq!(get_match_count(&results, "test_count_gt", "$c"), 4);
+    assert_eq!(get_match_count(&results, "test_count_lt", "$d"), 4);
+    assert_eq!(get_match_count(&results, "test_count_eq", "$e"), 4);
+    assert_eq!(get_match_count(&results, "test_for_of_count", "$f"), 4);
+    assert_eq!(get_match_count(&results, "test_unbounded_offset", "$g"), 4);
+    assert_eq!(
+        get_match_count(&results, "test_shared_pattern_fast_scan", "$g"),
+        4
+    );
+    // $j is anchored at 0 even when `all of them` is also present, so only the
+    // match at offset 0 is checked and recorded.
+    assert_eq!(
+        get_match_count(&results, "test_anchored_and_all_of_them", "$j"),
+        1
+    );
+    assert_eq!(
+        get_match_count(&results, "test_anchored_and_all_of_them", "$k"),
+        2
+    );
 
     // Test fast scan mode (fast_scan = true)
     let mut scanner = Scanner::new(&rules);
     scanner.fast_scan(true);
-    let results = scanner.scan(b"foofoobarbarbazbaz").unwrap();
+    let results = scanner.scan(input).unwrap();
 
-    // Rule test_boolean still matches
-    let test_boolean = results
-        .matching_rules()
-        .find(|r| r.identifier() == "test_boolean")
-        .unwrap();
-    // But pattern $a must only have 1 match because it is fast-scanned!
-    let mut patterns_a =
-        test_boolean.patterns().filter(|p| p.identifier() == "$a");
-    assert_eq!(patterns_a.next().unwrap().matches().len(), 1);
-
-    // Pattern $c must still have 2 matches because #c is used, disabling fast scan!
-    let test_count = results
-        .matching_rules()
-        .find(|r| r.identifier() == "test_count")
-        .unwrap();
-    let mut patterns_c =
-        test_count.patterns().filter(|p| p.identifier() == "$c");
-    assert_eq!(patterns_c.next().unwrap().matches().len(), 2);
+    // $a only needs 1 match
+    assert_eq!(get_match_count(&results, "test_boolean", "$a"), 1);
+    // #c > 2 stops after 2 + 1 = 3 matches (even though 4 exist in input)
+    assert_eq!(get_match_count(&results, "test_count_gt", "$c"), 3);
+    // #d < 3 stops after 3 matches (even though 4 exist in input)
+    assert_eq!(get_match_count(&results, "test_count_lt", "$d"), 3);
+    // #e != 2 stops after 2 + 1 = 3 matches (even though 4 exist in input)
+    assert_eq!(get_match_count(&results, "test_count_eq", "$e"), 3);
+    // for any of ($f) : ( # >= 3 ) stops after 3 matches
+    assert_eq!(get_match_count(&results, "test_for_of_count", "$f"), 3);
+    // @g[1] >= 0 disallows fast-scan, so all 4 matches are tracked
+    assert_eq!(get_match_count(&results, "test_unbounded_offset", "$g"), 4);
+    // In test_shared_pattern_fast_scan, $g only needs 1 match even though
+    // test_unbounded_offset declares the same literal without fast-scan.
+    assert_eq!(
+        get_match_count(&results, "test_shared_pattern_fast_scan", "$g"),
+        1
+    );
+    // $j is anchored at 0 and $k stops after 1 match in fast-scan mode
+    assert_eq!(
+        get_match_count(&results, "test_anchored_and_all_of_them", "$j"),
+        1
+    );
+    assert_eq!(
+        get_match_count(&results, "test_anchored_and_all_of_them", "$k"),
+        1
+    );
 }
 
 #[test]
@@ -1365,29 +1565,424 @@ fn test_slow_rule_hang() {
 }
 
 #[test]
+#[cfg(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    )
+))]
 fn test_teddy_scan_timeout() {
+    use std::fmt::Write;
     use std::time::Duration;
 
+    // Build a rule with 64 distinct literal patterns (the maximum number of
+    // patterns supported by Teddy) that all share the 4-byte atom `"aaaa"`.
+    // All 64 atoms hash to the same Teddy bucket, so scanning a buffer of `'a'`
+    // bytes triggers 64 Teddy atom matches per byte while failing literal
+    // verification on the trailing `\x00` bytes (which prevents the patterns
+    // from reaching `max_matches_per_pattern` and being disabled).
+    let mut rule = String::from("rule test { strings:\n");
+    for i in 1..=64 {
+        writeln!(rule, r#"$ = "aaaa{}""#, "\\x00".repeat(i)).unwrap();
+    }
+    rule.push_str("condition: any of them }");
+
+    let rules = crate::compile(rule.as_str()).unwrap();
+
+    assert_eq!(rules.atoms.len(), 64);
+    assert!(rules.ac_automaton().teddy.is_some());
+
+    let mut scanner = Scanner::new(&rules);
+    scanner.set_timeout(Duration::from_secs(1));
+
+    let data = vec![b'a'; 10_000_000];
+
+    let err = scanner.scan(&data).unwrap_err();
+    assert_eq!(err.to_string(), "timeout");
+}
+
+#[cfg(feature = "test_proto2-module")]
+#[test]
+fn runtime_string_from_large_slice() {
     let rules = crate::compile(
         r#"
-        rule test {
-            strings:
-                $a = "abcd"
+        import "test_proto2"
+        rule exact_u16_max {
             condition:
-                $a
+                test_proto2.head(65535) startswith "aaaa" and
+                test_proto2.head(65535) endswith "aaaa"
+        }
+        rule larger_than_u16_max {
+            condition:
+                test_proto2.head(65536) startswith "aaaa" and
+                test_proto2.head(65536) endswith "aaaa"
+        }
+        "#,
+    )
+    .unwrap();
+
+    let data = vec![b'a'; 70_000];
+    let mut scanner = Scanner::new(&rules);
+    let results = scanner.scan(&data).unwrap();
+    assert_eq!(results.matching_rules().len(), 2);
+}
+
+#[test]
+fn anchored_pattern_large_offsets() {
+    let rules = crate::compile(
+        r#"
+        rule r1 {
+            strings:
+                $a = "foobar"
+            condition:
+                $a at 0xffffffff
+        }
+        rule r2 {
+            strings:
+                $a = "foobar"
+            condition:
+                $a at 0x100000000
+        }
+        rule r3 {
+            strings:
+                $a = "foobar"
+            condition:
+                all of ($a) at 0x100000000
+        }
+        rule r4 {
+            strings:
+                $a = "foobar"
+            condition:
+                $a and $a at 0x100000000
         }
         "#,
     )
     .unwrap();
 
     let mut scanner = Scanner::new(&rules);
-    scanner.set_timeout(Duration::from_secs(1));
+    let results = scanner.scan(b"foobar").unwrap();
+    assert_eq!(results.matching_rules().len(), 0);
+}
 
-    let mut data = Vec::with_capacity(10_000_000);
-    for _ in 0..2_500_000 {
-        data.extend_from_slice(b"abcd");
-    }
+#[cfg(feature = "pe-module")]
+#[test]
+fn pe_section_index_overflow() {
+    let rules = crate::compile(
+        r#"
+        import "pe"
+        rule test {
+            condition:
+                pe.section_index(0xffffff80) == 0 and
+                not defined pe.section_index(0x00000080)
+        }
+        "#,
+    )
+    .unwrap();
 
-    let err = scanner.scan(&data).unwrap_err();
-    assert_eq!(err.to_string(), "timeout");
+    let mut valid_pe = mods::PE::new();
+    valid_pe.set_is_pe(true);
+    let mut sec = mods::pe::Section::new();
+    sec.set_name(b".text".to_vec());
+    sec.set_full_name(b".text".to_vec());
+    sec.set_characteristics(0);
+    sec.set_raw_data_offset(0xffff_ff00);
+    sec.set_raw_data_size(0x200);
+    sec.set_virtual_address(0x1000);
+    sec.set_virtual_size(0x200);
+    sec.set_pointer_to_relocations(0);
+    sec.set_pointer_to_line_numbers(0);
+    sec.set_number_of_relocations(0);
+    sec.set_number_of_line_numbers(0);
+    valid_pe.sections.push(sec);
+
+    let mut scanner = Scanner::new(&rules);
+    scanner.set_module_output(Box::new(valid_pe)).unwrap();
+    let results = scanner.scan(b"").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+}
+
+#[cfg(feature = "pe-module")]
+#[test]
+fn set_module_output_partial_pe() {
+    let rules = crate::compile(
+        r#"
+        import "pe"
+        rule test {
+            condition:
+                not defined pe.rva_to_offset(0x1000) and
+                pe.offset_to_rva(0x200) == 0 and
+                pe.imphash() == "d41d8cd98f00b204e9800998ecf8427e" and
+                pe.rich_signature.toolid(1) == 0 and
+                pe.rich_signature.version(1) == 0 and
+                pe.rich_signature.toolid(1, 1) == 0
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+
+    // Run a normal scan first so `pe::main` clears thread-local caches.
+    let _ = scanner.scan(b"").unwrap();
+
+    let mut pe_data = Box::new(mods::PE::new());
+    pe_data.set_is_pe(true);
+    pe_data.set_file_alignment(0x200);
+    pe_data.set_section_alignment(0x1000);
+
+    // Unpopulated section (`None` fields) and partial section missing
+    // `virtual_address` / `virtual_size`.
+    pe_data.sections.push(mods::pe::Section::new());
+    let mut partial_sec = mods::pe::Section::new();
+    partial_sec.set_raw_data_offset(0x200);
+    partial_sec.set_raw_data_size(0x200);
+    pe_data.sections.push(partial_sec);
+
+    // Partial `Import` entries missing `library_name` or `func.name`.
+    pe_data.import_details.push(mods::pe::Import::new());
+    let mut imp = mods::pe::Import::new();
+    imp.set_library_name("kernel32.dll".to_string());
+    imp.functions.push(mods::pe::Function::new());
+    pe_data.import_details.push(imp);
+
+    // Partial `RichTool` entry missing `toolid` and `version`.
+    let mut rich = mods::pe::RichSignature::new();
+    rich.tools.push(mods::pe::RichTool::new());
+    pe_data.rich_signature = protobuf::MessageField::some(rich);
+
+    scanner.set_module_output(pe_data).unwrap();
+    let results = scanner.scan(b"").unwrap();
+    assert_eq!(results.matching_rules().len(), 1);
+
+    // Also verify a wire-valid PE protobuf via `set_module_output_raw` where
+    // optional `Function.name` is unset (`None`).
+    let imphash_rules = crate::compile(
+        r#"
+        import "pe"
+        rule test_imphash {
+            condition:
+                pe.imphash() == "d41d8cd98f00b204e9800998ecf8427e"
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut valid_pe = mods::PE::new();
+    valid_pe.set_is_pe(true);
+    let mut func = mods::pe::Function::new();
+    func.set_ordinal(1);
+    func.set_rva(0x2000);
+    let mut imp = mods::pe::Import::new();
+    imp.set_library_name("kernel32.dll".to_string());
+    imp.set_number_of_functions(1);
+    imp.functions.push(func);
+    valid_pe.import_details.push(imp);
+
+    let raw = valid_pe.write_to_bytes().unwrap();
+    let mut scanner = Scanner::new(&imphash_rules);
+    let _ = scanner.scan(b"").unwrap();
+    scanner.set_module_output_raw("pe", &raw).unwrap();
+    assert_eq!(scanner.scan(b"").unwrap().matching_rules().len(), 1);
+}
+
+#[test]
+fn hoisting_percentage_quantifier_var_shift() {
+    let mut compiler = crate::Compiler::new();
+    compiler
+        .condition_optimization(true)
+        .add_source(
+            r#"
+            import "math"
+            rule test {
+                condition:
+                    for any i in (0..1) : (
+                        i >= 0 and
+                        with s = math.to_string(filesize) : (
+                            for (math.to_number(s == "1") * 100)% j in (0..1) : (
+                                int8(0) == 65 and j >= 0
+                            )
+                        )
+                    )
+            }
+            "#,
+        )
+        .unwrap();
+
+    let rules = compiler.build();
+    let mut scanner = Scanner::new(&rules);
+    assert_eq!(scanner.scan(b"A").unwrap().matching_rules().len(), 1);
+    assert_eq!(scanner.scan(b"B").unwrap().matching_rules().len(), 0);
+}
+
+#[test]
+fn loop_frame_allocation_order() {
+    let rules = crate::compile(
+        r#"
+        import "math"
+        rule tuple_with_inner_vars {
+            condition:
+                for all v in (
+                    1,
+                    math.to_number(with x = 2, y = 0 : ( x + y == 2 ))
+                ) : (
+                    v == 1
+                )
+        }
+        rule for_of_quantifier_with_inner_vars {
+            strings:
+                $a = "abc"
+            condition:
+                for (math.to_number(with x = 1, y = 99 : ( x + y == 100 ))) of ($a) : ( $ )
+        }
+        rule of_quantifier_with_inner_vars {
+            condition:
+                (math.to_number(with x = 1, y = 99 : ( x + y == 100 ))) of (true, false)
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut scanner = Scanner::new(&rules);
+    assert_eq!(scanner.scan(b"abc").unwrap().matching_rules().len(), 3);
+
+    // Also verify `IR::hoisting` when an outer `with` binds a module function
+    // (`TypeValue::Func`, which reserves a frame slot without pushing to
+    // `With::declarations`) alongside an inner `RuntimeString` variable.
+    let mut compiler = crate::Compiler::new();
+    compiler
+        .condition_optimization(true)
+        .add_source(
+            r#"
+            import "math"
+            rule hoisting_with_func_alias {
+                condition:
+                    with f = math.abs : (
+                        with s = math.to_string(filesize) : (
+                            for any i in (0..1) : (
+                                f(int8(0)) == 65 + i and s == "1"
+                            )
+                        )
+                    )
+            }
+            "#,
+        )
+        .unwrap();
+
+    let opt_rules = compiler.build();
+    let mut opt_scanner = Scanner::new(&opt_rules);
+    assert_eq!(opt_scanner.scan(b"A").unwrap().matching_rules().len(), 1);
+    assert_eq!(opt_scanner.scan(b"C").unwrap().matching_rules().len(), 0);
+}
+
+#[test]
+fn hoisting_in_for_in_iterable() {
+    let mut compiler = crate::Compiler::new();
+    compiler
+        .condition_optimization(true)
+        .add_source(
+            r#"
+            import "math"
+            rule test {
+                condition:
+                    for any v in (
+                        math.to_number(
+                            for any i in (0..2) : (
+                                math.to_string(filesize) == math.to_string(i)
+                            )
+                        ),
+                        0
+                    ) : (
+                        v == 1
+                    )
+            }
+            "#,
+        )
+        .unwrap();
+
+    let rules = compiler.build();
+    let mut scanner = Scanner::new(&rules);
+    assert_eq!(scanner.scan(b"A").unwrap().matching_rules().len(), 1);
+    assert_eq!(scanner.scan(b"ABCD").unwrap().matching_rules().len(), 0);
+}
+
+#[test]
+fn hoisting_for_of_pattern_vars() {
+    let mut compiler = crate::Compiler::new();
+    compiler
+        .condition_optimization(true)
+        .add_source(
+            r#"
+            rule test {
+                strings:
+                    $a = "zzz"
+                    $b = "abc"
+                condition:
+                    for any i in (0..1) : (
+                        i == 0 and
+                        for any of ($a, $b) : (
+                            $ and # == 1 and @[1] == 0 and ![1] == 3
+                        )
+                    )
+            }
+            "#,
+        )
+        .unwrap();
+
+    let rules = compiler.build();
+    let mut scanner = Scanner::new(&rules);
+    assert_eq!(scanner.scan(b"abc").unwrap().matching_rules().len(), 1);
+    assert_eq!(scanner.scan(b"def").unwrap().matching_rules().len(), 0);
+}
+
+#[test]
+fn hoisting_max_vars_and_candidate_limit() {
+    // 1. Many loop-invariant expressions inside a single `for` loop (`None`
+    // dependency branch in `find_hoisting_candidates`).
+    let many_checks = (0..150)
+        .map(|k| format!("uint8(0) + {k} == {}", 65 + k))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let src_many = format!(
+        "rule many_invariants {{ condition: for any i in (0..1) : ( i == 0 and {} ) }}",
+        many_checks
+    );
+
+    let mut compiler = crate::Compiler::new();
+    compiler
+        .condition_optimization(true)
+        .add_source(src_many.as_str())
+        .unwrap();
+    let rules = compiler.build();
+    let mut scanner = Scanner::new(&rules);
+    assert_eq!(scanner.scan(b"A").unwrap().matching_rules().len(), 1);
+    assert_eq!(scanner.scan(b"B").unwrap().matching_rules().len(), 0);
+
+    // 2. Outer `with` occupying `MAX_VARS - FOR_IN_FRAME_SIZE` (2048 - 7 = 2041)
+    // slots so the inner `for` loop sits right at the `wasm::MAX_VARS` ceiling
+    // with zero room to shift variables during hoisting.
+    let num_with_vars = (crate::wasm::MAX_VARS - 7) as usize;
+    let decls = (0..num_with_vars)
+        .map(|k| format!("v{k} = {k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let uses = (0..num_with_vars)
+        .map(|k| format!("v{k}"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let expected_sum: usize = (0..num_with_vars).sum();
+    let src_ceiling = format!(
+        "rule at_max_vars {{ condition: with {decls} : ( ({uses}) == {expected_sum} and for any i in (0..1) : ( uint8(0) == 65 and i == 0 ) ) }}"
+    );
+
+    let mut compiler = crate::Compiler::new();
+    compiler
+        .condition_optimization(true)
+        .add_source(src_ceiling.as_str())
+        .unwrap();
+    let rules = compiler.build();
+    let mut scanner = Scanner::new(&rules);
+    assert_eq!(scanner.scan(b"A").unwrap().matching_rules().len(), 1);
+    assert_eq!(scanner.scan(b"B").unwrap().matching_rules().len(), 0);
 }

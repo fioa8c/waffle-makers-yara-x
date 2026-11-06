@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use strum_macros::Display;
 
 use yara_x::mods::*;
-use yara_x_proto::json::Serializer as JsonSerializer;
+use yara_x_proto::json::{Format as JsonFormat, Serializer as JsonSerializer};
 use yara_x_proto::yaml::Serializer as YamlSerializer;
 
 use crate::help;
@@ -24,6 +24,7 @@ enum SupportedModules {
     Vba,
     Crx,
     Dex,
+    Zip,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -127,6 +128,9 @@ pub fn exec_dump(args: &ArgMatches) -> anyhow::Result<()> {
         if !requested_modules.contains(&&SupportedModules::Vba) {
             module_output.vba = MessageField::none()
         }
+        if !requested_modules.contains(&&SupportedModules::Zip) {
+            module_output.zip = MessageField::none()
+        }
     } else {
         // Module was not specified, only show those that produced meaningful
         // results, the rest are cleared out.
@@ -159,6 +163,9 @@ pub fn exec_dump(args: &ArgMatches) -> anyhow::Result<()> {
         if !module_output.vba.has_macros() {
             module_output.vba = MessageField::none()
         }
+        if !module_output.zip.is_zip() {
+            module_output.zip = MessageField::none()
+        }
     }
 
     match output_format {
@@ -166,6 +173,7 @@ pub fn exec_dump(args: &ArgMatches) -> anyhow::Result<()> {
             let mut serializer = JsonSerializer::new(stdout());
             serializer
                 .with_colors(use_color)
+                .with_format(JsonFormat::Legacy)
                 .serialize(module_output.as_ref())?;
             println!();
         }

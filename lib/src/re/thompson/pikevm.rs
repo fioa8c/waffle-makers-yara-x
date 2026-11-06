@@ -24,7 +24,7 @@ pub(crate) struct PikeVM<'r> {
     next_threads: Vec<Thread>,
     /// Maximum number of bytes to scan. The VM will abort after ingesting
     /// this number of bytes from the input.
-    scan_limit: u16,
+    scan_limit: u32,
     /// State for the [`epsilon_closure`] function.
     cache: EpsilonClosureState,
 }
@@ -53,7 +53,7 @@ impl<'r> PikeVM<'r> {
     ///
     /// The default limit is 4096 bytes.
     #[allow(dead_code)]
-    pub fn scan_limit(mut self, limit: u16) -> Self {
+    pub fn scan_limit(mut self, limit: u32) -> Self {
         self.scan_limit = limit;
         self
     }
@@ -171,17 +171,23 @@ impl<'r> PikeVM<'r> {
         // called.
         debug_assert!(self.threads.is_empty());
 
+        let code = self.code;
+        let scan_limit = self.scan_limit as usize;
+        let cache = &mut self.cache;
+        let (mut threads, mut next_threads) =
+            (&mut self.threads, &mut self.next_threads);
+
         epsilon_closure(
-            self.code,
+            code,
             start,
             0,
             curr_byte,
             bck_input.next(),
-            &mut self.cache,
-            &mut self.threads,
+            cache,
+            threads,
         );
 
-        while !self.threads.is_empty() {
+        while !threads.is_empty() {
             let mut next_byte = fwd_input.next();
             // When there is only a single active thread in the VM (that is,
             // `self.threads.len() == 1`), we can optimize execution by
@@ -194,12 +200,12 @@ impl<'r> PikeVM<'r> {
             // desynchronize and bypass other threads matching at different
             // positions or branches. It's safe to set decode_literal_runs
             // always to false, it will simply disable the optimization.
-            let decode_literal_runs = self.threads.len() == 1;
+            let decode_literal_runs = threads.len() == 1;
 
-            for (ip, rep_count) in self.threads.iter() {
+            for (ip, rep_count) in threads.iter() {
                 let ip = *ip as usize;
                 let (instr, mut instr_size) = InstrParser::decode_instr(
-                    unsafe { self.code.get_unchecked(ip..) },
+                    unsafe { code.get_unchecked(ip..) },
                     decode_literal_runs,
                 );
 
@@ -285,13 +291,13 @@ impl<'r> PikeVM<'r> {
 
                 if is_match {
                     epsilon_closure(
-                        self.code,
+                        code,
                         C::from(ip + instr_size),
                         *rep_count,
                         next_byte,
                         curr_byte,
-                        &mut self.cache,
-                        &mut self.next_threads,
+                        cache,
+                        next_threads,
                     );
                 }
             }
@@ -299,11 +305,11 @@ impl<'r> PikeVM<'r> {
             curr_byte = next_byte;
             current_pos += 1;
 
-            mem::swap(&mut self.threads, &mut self.next_threads);
-            self.next_threads.clear();
+            mem::swap(&mut threads, &mut next_threads);
+            next_threads.clear();
 
-            if current_pos >= self.scan_limit as usize {
-                self.threads.clear();
+            if current_pos >= scan_limit {
+                threads.clear();
                 break;
             }
         }
@@ -622,10 +628,40 @@ pub(crate) fn epsilon_closure<C: CodeLoc>(
                     (false, Some(p), Some(c)) | (true, Some(c), Some(p)) => {
                         is_word_char(*p) && !is_word_char(*c)
                     }
-                    (false, Some(p), None) | (true, Some(p), None) => {
+                    (false, Some(p), None) | (true, None, Some(p)) => {
                         is_word_char(*p)
                     }
                     _ => false,
+                };
+                if is_match {
+                    state.threads.push((
+                        apply_offset(ip, instr_size.into()),
+                        rep_count,
+                    ));
+                }
+            }
+            Instr::WordStartHalf => {
+                let is_match = match (start.backwards(), prev_byte, curr_byte)
+                {
+                    (false, None, _) | (true, _, None) => true,
+                    (false, Some(b), _) | (true, _, Some(b)) => {
+                        !is_word_char(*b)
+                    }
+                };
+                if is_match {
+                    state.threads.push((
+                        apply_offset(ip, instr_size.into()),
+                        rep_count,
+                    ));
+                }
+            }
+            Instr::WordEndHalf => {
+                let is_match = match (start.backwards(), prev_byte, curr_byte)
+                {
+                    (false, _, None) | (true, None, _) => true,
+                    (false, _, Some(b)) | (true, Some(b), _) => {
+                        !is_word_char(*b)
+                    }
                 };
                 if is_match {
                     state.threads.push((

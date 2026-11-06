@@ -1,6 +1,7 @@
 use std::collections::hash_map;
 use std::fmt;
 use std::io::{BufWriter, Read, Write};
+use std::num::NonZeroU32;
 use std::ops::{Bound, RangeBounds};
 use std::slice::Iter;
 #[cfg(feature = "logging")]
@@ -19,8 +20,8 @@ use crate::compiler::errors::SerializationError;
 use crate::compiler::report::CodeLoc;
 use crate::compiler::warnings::Warning;
 use crate::compiler::{
-    IdentId, Imports, LiteralId, NamespaceId, PatternId, RegexId, RegexSetId,
-    RuleId, SubPattern, SubPatternId,
+    IdentId, Imports, LiteralId, LiteralSetId, NamespaceId, PatternId,
+    RegexId, RegexSetId, RuleId, SubPattern, SubPatternId,
 };
 use crate::models::PatternKind;
 use crate::re::{BckCodeLoc, FwdCodeLoc, RegexpAtom};
@@ -34,7 +35,7 @@ const MAGIC: &[u8] = b"YARA-X\0\0";
 ///
 /// This version is incremented every time a change is made to the binary
 /// format in a way that breaks backwards compatibility.
-const SERIALIZATION_VERSION: u32 = 6;
+const SERIALIZATION_VERSION: u32 = 13;
 
 /// Aho-Corasick automaton bundled with an optional Teddy scanner if the
 /// number of patterns is low enough. If the Teddy scanner is present, and
@@ -138,7 +139,7 @@ pub struct Rules {
     /// Pool with literal strings used in the rules. Each literal has its
     /// own [`LiteralId`], which can be used for retrieving the literal
     /// string as `&BStr`.
-    pub(in crate::compiler) lit_pool: BStringPool<LiteralId>,
+    pub(in crate::compiler) literal_pool: BStringPool<LiteralId>,
 
     /// WASM module as in raw form.
     pub(in crate::compiler) wasm_mod: Vec<u8>,
@@ -245,16 +246,17 @@ pub struct Rules {
     /// set automata for single-pass evaluation.
     pub(in crate::compiler) regex_sets: FxHashMap<RegexSetId, Vec<RegexId>>,
 
-    /// BitVec where the N-th bit indicates whether the pattern with
-    /// PatternId = N is a fast-scan pattern.
+    /// Grouped `LiteralSet` persistent definitions.
     ///
-    /// A pattern can be fast-scanned if its occurrences are only evaluated
-    /// as simple boolean checks (e.g. `$a`), meaning the scanner can stop
-    /// tracking matches for it once the first match has been found. If a
-    /// pattern is used in a context that requires tracking all matches (such
-    /// as count `#a`, offset `@a`, length `!a`, anchored checks, or loop
-    /// equivalents), it cannot be fast-scanned.
-    pub(in crate::compiler) fast_scan_patterns: bitvec::vec::BitVec,
+    /// Populated during `Compiler::build`, each entry maps a unique
+    /// `LiteralSetId` to an ordered list of `LiteralId`s.
+    pub(in crate::compiler) literal_sets:
+        FxHashMap<LiteralSetId, Vec<LiteralId>>,
+
+    /// Vector where the N-th element indicates the maximum number of matches
+    /// required in fast-scan mode for the pattern with PatternId = N, or
+    /// `None` if all matches must be tracked.
+    pub(in crate::compiler) fast_scan_max_matches: Vec<Option<NonZeroU32>>,
 
     /// Indicates whether the rules were compiled with rules profiling enabled.
     ///
@@ -378,18 +380,38 @@ impl Rules {
 
         rules.ac.rebuild_teddy(rules.atoms.iter().map(|x| x.atom.as_ref()));
 
-        // Make sure that the maximum SubPatternId is within the boundaries
-        // of sub_patterns array. This check is important because during
-        // the scanning phase we use SubPatternId as indexes in the array
-        // without boundary checks for better performance.
-        let max_sub_pattern_id = rules
-            .atoms
-            .iter()
-            .map(|atom| atom.sub_pattern_id)
-            .max()
-            .unwrap_or(SubPatternId(0));
+        // Validate that all SubPatternId, PatternId, FwdCodeLoc, and BckCodeLoc
+        // values are within the boundaries of their respective arrays. This is
+        // important because during the scanning phase some of these IDs and
+        // offsets are used for indexing arrays without boundary checks for
+        // better performance.
+        let num_sub_patterns = rules.sub_patterns.len();
+        let re_code_len = rules.re_code.len();
 
-        if rules.sub_patterns.len() < max_sub_pattern_id.0 as usize {
+        let valid_atoms = rules.atoms.iter().all(|atom| {
+            (atom.sub_pattern_id.0 as usize) < num_sub_patterns
+                && atom.fwd_code.is_none_or(|loc| {
+                    re::CodeLoc::location(&loc) < re_code_len
+                })
+                && atom.bck_code.is_none_or(|loc| {
+                    re::CodeLoc::location(&loc) < re_code_len
+                })
+        });
+
+        let valid_anchored = rules
+            .anchored_sub_patterns
+            .iter()
+            .all(|id| (id.0 as usize) < num_sub_patterns);
+
+        let valid_sub_patterns =
+            rules.sub_patterns.iter().all(|(pattern_id, sub_pattern)| {
+                usize::from(*pattern_id) < rules.num_patterns
+                    && sub_pattern
+                        .chained_to()
+                        .is_none_or(|id| (id.0 as usize) < num_sub_patterns)
+            });
+
+        if !valid_atoms || !valid_anchored || !valid_sub_patterns {
             return Err(SerializationError::InvalidFormat);
         }
 
@@ -479,34 +501,43 @@ impl Rules {
 
         let hir = parser.parse(&re).unwrap();
 
-        hir.build_automata().unwrap_or_else(|err| {
+        re::hir::Hir::build_automata(&[hir]).unwrap_or_else(|err| {
             panic!("error compiling regex `{}`: {:#?}", re.as_str(), err)
         })
     }
 
-    /// Returns a compiled multi-pattern `RegexSet` for a given `RegexSetId`.
+    /// Returns a compiled multi-pattern `Regex` for a given `RegexSetId`.
     #[inline]
-    pub(crate) fn get_regex_set(
-        &self,
-        set_id: RegexSetId,
-    ) -> regex::bytes::RegexSet {
-        let re_ids = self.regex_sets.get(&set_id).unwrap();
-        let mut patterns = Vec::with_capacity(re_ids.len());
+    pub(crate) fn get_regex_set(&self, set_id: RegexSetId) -> Option<Regex> {
+        let re_ids = self.regex_sets.get(&set_id)?;
+        let parser = re::parser::Parser::new()
+            .relaxed_re_syntax(self.relaxed_re_syntax);
+        let mut hirs = Vec::with_capacity(re_ids.len());
 
         for &re_id in re_ids {
-            let re = types::Regexp::new(self.regex_pool.get(re_id).unwrap());
-            let parser = re::parser::Parser::new()
-                .relaxed_re_syntax(self.relaxed_re_syntax);
-            let hir = parser.parse(&re).unwrap().into_inner();
-            patterns.push(hir.to_string());
+            let re = types::Regexp::new(self.regex_pool.get(re_id)?);
+            hirs.push(parser.parse(&re).ok()?);
         }
 
-        regex::bytes::RegexSetBuilder::new(patterns)
-            .size_limit(1024 * 1024 * 1024)
-            .build()
-            .unwrap_or_else(|err| {
-                panic!("error compiling RegexSet: {:#?}", err)
-            })
+        re::hir::Hir::build_automata(&hirs).ok()
+    }
+
+    /// Returns the slice of [`RegexId`]s belonging to a given [`RegexSetId`].
+    #[inline]
+    pub(crate) fn get_regex_set_ids(
+        &self,
+        set_id: RegexSetId,
+    ) -> Option<&[RegexId]> {
+        self.regex_sets.get(&set_id).map(Vec::as_slice)
+    }
+
+    /// Returns the slice of [`LiteralId`]s belonging to a given [`LiteralSetId`].
+    #[inline]
+    pub(crate) fn get_literal_set(
+        &self,
+        set_id: LiteralSetId,
+    ) -> &[LiteralId] {
+        self.literal_sets.get(&set_id).unwrap()
     }
 
     /// Returns a sub-pattern by [`SubPatternId`].
@@ -515,6 +546,7 @@ impl Rules {
         &self,
         sub_pattern_id: SubPatternId,
     ) -> &(PatternId, SubPattern) {
+        debug_assert!((sub_pattern_id.0 as usize) < self.sub_patterns.len());
         unsafe { self.sub_patterns.get_unchecked(sub_pattern_id.0 as usize) }
     }
 
@@ -641,8 +673,8 @@ impl Rules {
     }
 
     #[inline]
-    pub(crate) fn lit_pool(&self) -> &BStringPool<LiteralId> {
-        &self.lit_pool
+    pub(crate) fn literal_pool(&self) -> &BStringPool<LiteralId> {
+        &self.literal_pool
     }
 
     #[inline]
@@ -681,8 +713,11 @@ impl Rules {
     }
 
     #[inline]
-    pub(crate) fn is_fast_scan(&self, pattern_id: PatternId) -> bool {
-        *self.fast_scan_patterns.get(usize::from(pattern_id)).unwrap()
+    pub(crate) fn fast_scan_max_matches(
+        &self,
+        pattern_id: PatternId,
+    ) -> Option<NonZeroU32> {
+        self.fast_scan_max_matches[usize::from(pattern_id)]
     }
 }
 
@@ -952,6 +987,13 @@ impl FilesizeBounds {
         }
         self
     }
+
+    /// Merges another set of filesize bounds into this one (intersection).
+    pub fn merge(&mut self, other: &Self) -> &mut Self {
+        self.max_start(other.start);
+        self.min_end(other.end);
+        self
+    }
 }
 
 /// Describes the requirements on the file header imposed by a rule condition.
@@ -978,6 +1020,28 @@ impl HeaderConstraint {
             Self::Unconstrained => true,
             Self::Unsatisfiable => false,
             Self::Constrained(bytes) => data.starts_with(bytes),
+        }
+    }
+
+    /// Merges another header constraint into this one (intersection).
+    pub fn merge(&mut self, other: &Self) {
+        match (&self, other) {
+            (Self::Unsatisfiable, _) => {}
+            (_, Self::Unsatisfiable) => {
+                *self = Self::Unsatisfiable;
+            }
+            (Self::Unconstrained, _) => {
+                *self = other.clone();
+            }
+            (_, Self::Unconstrained) => {}
+            (Self::Constrained(a), Self::Constrained(b)) => {
+                let min_len = a.len().min(b.len());
+                if a[..min_len] != b[..min_len] {
+                    *self = Self::Unsatisfiable;
+                } else if b.len() > a.len() {
+                    *self = other.clone();
+                }
+            }
         }
     }
 }
@@ -1053,5 +1117,195 @@ impl SubPatternAtom {
     #[inline]
     pub(crate) fn bck_code(&self) -> Option<BckCodeLoc> {
         self.bck_code
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HeaderConstraint;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn header_constraint_merge() {
+        let merge = |mut a: HeaderConstraint, b: &HeaderConstraint| {
+            a.merge(b);
+            a
+        };
+
+        let unconstrained = HeaderConstraint::Unconstrained;
+        let unsatisfiable = HeaderConstraint::Unsatisfiable;
+        let constrained =
+            |bytes: &[u8]| HeaderConstraint::Constrained(bytes.to_vec());
+
+        // (Unsatisfiable, _) => Unsatisfiable
+        assert_eq!(
+            merge(unsatisfiable.clone(), &unsatisfiable),
+            unsatisfiable
+        );
+        assert_eq!(
+            merge(unsatisfiable.clone(), &unconstrained),
+            unsatisfiable
+        );
+        assert_eq!(
+            merge(unsatisfiable.clone(), &constrained(&[0x4D, 0x5A])),
+            unsatisfiable
+        );
+
+        // (_, Unsatisfiable) => Unsatisfiable
+        assert_eq!(
+            merge(unconstrained.clone(), &unsatisfiable),
+            unsatisfiable
+        );
+        assert_eq!(
+            merge(constrained(&[0x4D, 0x5A]), &unsatisfiable),
+            unsatisfiable
+        );
+
+        // (Unconstrained, _) => other
+        assert_eq!(
+            merge(unconstrained.clone(), &unconstrained),
+            unconstrained
+        );
+        assert_eq!(
+            merge(unconstrained.clone(), &constrained(&[0x4D, 0x5A])),
+            constrained(&[0x4D, 0x5A])
+        );
+
+        // (_, Unconstrained) => self
+        assert_eq!(
+            merge(constrained(&[0x4D, 0x5A]), &unconstrained),
+            constrained(&[0x4D, 0x5A])
+        );
+
+        // (Constrained(a), Constrained(b)) where a == b
+        assert_eq!(
+            merge(constrained(&[0x4D, 0x5A]), &constrained(&[0x4D, 0x5A])),
+            constrained(&[0x4D, 0x5A])
+        );
+
+        // (Constrained(a), Constrained(b)) where a is a prefix of b (b.len() > a.len())
+        assert_eq!(
+            merge(
+                constrained(&[0x4D, 0x5A]),
+                &constrained(&[0x4D, 0x5A, 0x90])
+            ),
+            constrained(&[0x4D, 0x5A, 0x90])
+        );
+
+        // (Constrained(a), Constrained(b)) where b is a prefix of a (a.len() > b.len())
+        assert_eq!(
+            merge(
+                constrained(&[0x4D, 0x5A, 0x90]),
+                &constrained(&[0x4D, 0x5A])
+            ),
+            constrained(&[0x4D, 0x5A, 0x90])
+        );
+
+        // (Constrained(a), Constrained(b)) with conflicting prefixes
+        assert_eq!(
+            merge(constrained(&[0x4D, 0x5A]), &constrained(&[0x4D, 0x00])),
+            unsatisfiable
+        );
+        assert_eq!(
+            merge(
+                constrained(&[0x4D, 0x5A]),
+                &constrained(&[0x7F, 0x45, 0x4C, 0x46])
+            ),
+            unsatisfiable
+        );
+        assert_eq!(
+            merge(
+                constrained(&[0x7F, 0x45, 0x4C, 0x46]),
+                &constrained(&[0x4D, 0x5A])
+            ),
+            unsatisfiable
+        );
+    }
+
+    #[test]
+    fn deserialize_validation() {
+        use crate::Rules;
+        use crate::compile;
+        use crate::compiler::errors::SerializationError;
+        use crate::compiler::{PatternId, SubPattern, SubPatternId};
+        use crate::re::{BckCodeLoc, FwdCodeLoc};
+
+        // Invalid SubPatternId in atoms (including off-by-one == sub_patterns.len()).
+        let mut rules =
+            compile(r#"rule t { strings: $a = "aaaa" condition: $a }"#)
+                .unwrap();
+        rules.atoms[0].sub_pattern_id =
+            SubPatternId(rules.sub_patterns.len() as u32);
+        let bytes = rules.serialize().unwrap();
+        assert!(matches!(
+            Rules::deserialize(&bytes),
+            Err(SerializationError::InvalidFormat)
+        ));
+
+        // Invalid SubPatternId in anchored_sub_patterns.
+        let mut rules =
+            compile(r#"rule t { strings: $a = "aaaa" condition: $a at 0 }"#)
+                .unwrap();
+        rules.anchored_sub_patterns[0] =
+            SubPatternId(rules.sub_patterns.len() as u32);
+        let bytes = rules.serialize().unwrap();
+        assert!(matches!(
+            Rules::deserialize(&bytes),
+            Err(SerializationError::InvalidFormat)
+        ));
+
+        // Invalid chained_to SubPatternId in sub_patterns.
+        let mut rules = compile(
+            r#"rule t { strings: $a = { 01 02 03 04 [-] 05 06 07 08 } condition: $a }"#,
+        )
+        .unwrap();
+        let num_sub_patterns = rules.sub_patterns.len() as u32;
+        for (_, sp) in &mut rules.sub_patterns {
+            if let SubPattern::LiteralChainTail { chained_to, .. }
+            | SubPattern::RegexpChainTail { chained_to, .. } = sp
+            {
+                *chained_to = SubPatternId(num_sub_patterns);
+            }
+        }
+        let bytes = rules.serialize().unwrap();
+        assert!(matches!(
+            Rules::deserialize(&bytes),
+            Err(SerializationError::InvalidFormat)
+        ));
+
+        // Invalid PatternId in sub_patterns.
+        let mut rules =
+            compile(r#"rule t { strings: $a = "aaaa" condition: $a }"#)
+                .unwrap();
+        rules.sub_patterns[0].0 = PatternId::from(rules.num_patterns);
+        let bytes = rules.serialize().unwrap();
+        assert!(matches!(
+            Rules::deserialize(&bytes),
+            Err(SerializationError::InvalidFormat)
+        ));
+
+        // Invalid FwdCodeLoc and BckCodeLoc in atoms.
+        let mut rules = compile(
+            r#"rule t { strings: $a = /foo[a-z]+bar/ condition: $a }"#,
+        )
+        .unwrap();
+        let re_code_len = rules.re_code.len();
+        rules.atoms[0].fwd_code = Some(FwdCodeLoc::from(re_code_len));
+        let bytes = rules.serialize().unwrap();
+        assert!(matches!(
+            Rules::deserialize(&bytes),
+            Err(SerializationError::InvalidFormat)
+        ));
+
+        let mut rules = compile(
+            r#"rule t { strings: $a = /foo[a-z]+bar/ condition: $a }"#,
+        )
+        .unwrap();
+        rules.atoms[0].bck_code = Some(BckCodeLoc::from(re_code_len));
+        let bytes = rules.serialize().unwrap();
+        assert!(matches!(
+            Rules::deserialize(&bytes),
+            Err(SerializationError::InvalidFormat)
+        ));
     }
 }

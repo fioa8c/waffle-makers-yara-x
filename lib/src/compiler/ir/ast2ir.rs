@@ -5,12 +5,14 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::iter;
+use std::num::NonZeroU32;
 use std::ops::{ControlFlow, RangeInclusive};
 use std::rc::Rc;
 
 use bstr::{BString, ByteSlice};
+use indexmap::IndexMap;
 use itertools::Itertools;
-use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use rustc_hash::{FxHashSet, FxHasher};
 use yara_x_parser::Span;
 use yara_x_parser::ast;
 use yara_x_parser::ast::WithSpan;
@@ -32,7 +34,7 @@ use crate::compiler::ir::{
 use crate::compiler::report::{Level, ReportBuilder};
 use crate::compiler::{
     CompileContext, CompileError, FilesizeBounds, ForVars, HeaderConstraint,
-    PatternIdx, RegexId, RegexSetId, TextPatternAsHex, warnings,
+    LiteralSetId, PatternIdx, RegexSetId, TextPatternAsHex, warnings,
 };
 use crate::errors::CustomError;
 use crate::errors::{MethodNotAllowedInWith, PotentiallySlowLoop};
@@ -40,9 +42,7 @@ use crate::re;
 use crate::re::parser::CaseSensitiveness;
 use crate::symbols::{Symbol, SymbolLookup, SymbolTable};
 use crate::types::Value::Const;
-use crate::types::{
-    IntegerConstraint, Map, Regexp, StringConstraint, Type, TypeValue,
-};
+use crate::types::{Map, Regexp, StringConstraint, Type, TypeValue};
 use crate::warnings::UnsatisfiableExpression;
 
 /// How many patterns a rule can have. If a rule has more than this number of
@@ -265,7 +265,6 @@ pub(in crate::compiler) fn text_pattern_from_ast<'src>(
         identifier: pattern.identifier.clone(),
         in_use: false,
         span: pattern.span(),
-        fast_scan_allowed: true,
         pattern: Pattern::Text(LiteralPattern {
             flags,
             text,
@@ -275,6 +274,7 @@ pub(in crate::compiler) fn text_pattern_from_ast<'src>(
             anchored_at: None,
             filesize_bounds: FilesizeBounds::default(),
             header_constraints: HeaderConstraint::default(),
+            max_matches_in_fast_scan: NonZeroU32::new(1),
         }),
     })
 }
@@ -326,13 +326,13 @@ pub(in crate::compiler) fn hex_pattern_from_ast<'src>(
         identifier: pattern.identifier.clone(),
         in_use: false,
         span: pattern.span(),
-        fast_scan_allowed: true,
         pattern: Pattern::Hex(RegexpPattern {
             hir,
             flags: pattern_flags,
             anchored_at: None,
             filesize_bounds: FilesizeBounds::default(),
             header_constraints: HeaderConstraint::default(),
+            max_matches_in_fast_scan: NonZeroU32::new(1),
         }),
     })
 }
@@ -465,13 +465,13 @@ pub(in crate::compiler) fn regexp_pattern_from_ast<'src>(
         identifier: pattern.identifier.clone(),
         in_use: false,
         span: pattern.span(),
-        fast_scan_allowed: true,
         pattern: Pattern::Regexp(RegexpPattern {
             flags,
             hir,
             anchored_at: None,
             filesize_bounds: FilesizeBounds::default(),
             header_constraints: HeaderConstraint::default(),
+            max_matches_in_fast_scan: NonZeroU32::new(1),
         }),
     })
 }
@@ -506,9 +506,9 @@ fn expr_from_ast<'src>(
             ctx.ir.constant(TypeValue::const_bool_from(false))
         }
 
-        ast::Expr::LiteralInteger(lit) => {
-            ctx.ir.constant(TypeValue::const_integer_from(lit.value))
-        }
+        ast::Expr::LiteralInteger(lit) => ctx.ir.constant(
+            TypeValue::const_integer_from_bits(lit.value, lit.is_unsigned),
+        ),
 
         ast::Expr::LiteralFloat(lit) => {
             ctx.ir.constant(TypeValue::const_float_from(lit.value))
@@ -526,7 +526,7 @@ fn expr_from_ast<'src>(
                     re_error_to_compile_error(ctx.report_builder, regexp, err)
                 })?;
 
-            hir.build_automata().map_err(|err| {
+            re::hir::Hir::build_automata(&[hir]).map_err(|err| {
                 InvalidRegexp::build(
                     ctx.report_builder,
                     err.to_string(),
@@ -585,38 +585,36 @@ fn expr_from_ast<'src>(
             // expression with an integer constant (e.g: `pe.is_signed == 0`).
             // This is quite common in YARA rules, it is accepted without
             // errors, but a warning is raised.
-            let replacement =
-                match (lhs_expr.type_value(), rhs_expr.type_value()) {
-                    (
-                        TypeValue::Bool { .. },
-                        TypeValue::Integer { value: Const(0), .. },
-                    ) => Some((
-                        ctx.ir.not(lhs),
-                        format!(
-                            "not {}",
-                            ctx.report_builder.get_snippet(lhs_span)
-                        ),
-                    )),
-                    (
-                        TypeValue::Integer { value: Const(0), .. },
-                        TypeValue::Bool { .. },
-                    ) => Some((
-                        ctx.ir.not(rhs),
-                        format!(
-                            "not {}",
-                            ctx.report_builder.get_snippet(rhs_span)
-                        ),
-                    )),
-                    (
-                        TypeValue::Bool { .. },
-                        TypeValue::Integer { value: Const(1), .. },
-                    ) => Some((lhs, ctx.report_builder.get_snippet(lhs_span))),
-                    (
-                        TypeValue::Integer { value: Const(1), .. },
-                        TypeValue::Bool { .. },
-                    ) => Some((rhs, ctx.report_builder.get_snippet(rhs_span))),
-                    _ => None,
-                };
+            let lhs_tv = lhs_expr.type_value();
+            let rhs_tv = rhs_expr.type_value();
+            let replacement = match (
+                &lhs_tv,
+                lhs_tv.try_as_const_i128(),
+                &rhs_tv,
+                rhs_tv.try_as_const_i128(),
+            ) {
+                (TypeValue::Bool { .. }, _, _, Some(0)) => Some((
+                    ctx.ir.not(lhs),
+                    format!(
+                        "not {}",
+                        ctx.report_builder.get_snippet(lhs_span)
+                    ),
+                )),
+                (_, Some(0), TypeValue::Bool { .. }, _) => Some((
+                    ctx.ir.not(rhs),
+                    format!(
+                        "not {}",
+                        ctx.report_builder.get_snippet(rhs_span)
+                    ),
+                )),
+                (TypeValue::Bool { .. }, _, _, Some(1)) => {
+                    Some((lhs, ctx.report_builder.get_snippet(lhs_span)))
+                }
+                (_, Some(1), TypeValue::Bool { .. }, _) => {
+                    Some((rhs, ctx.report_builder.get_snippet(rhs_span)))
+                }
+                _ => None,
+            };
 
             if let Some((replacement_expr, replacement)) = replacement {
                 let code_loc = ctx.report_builder.span_to_code_loc(span);
@@ -785,23 +783,10 @@ fn expr_from_ast<'src>(
                     )
                 }
                 _ => {
-                    let at = match anchor {
-                        MatchAnchor::At(expr) => {
-                            ctx.ir.get(expr).try_as_const_integer()
-                        }
-                        _ => None,
-                    };
-
                     let (pattern_idx, pattern) =
                         ctx.get_pattern_mut(&p.identifier)?;
 
                     pattern.mark_as_used();
-
-                    if let Some(offset) = at {
-                        pattern.anchor_at(offset as usize);
-                    } else {
-                        pattern.make_non_anchorable();
-                    }
 
                     if !matches!(anchor, MatchAnchor::None) {
                         pattern.disallow_fast_scan();
@@ -840,19 +825,13 @@ fn expr_from_ast<'src>(
                     let range = range_from_ast(ctx, range)?;
                     let (pattern_idx, pattern) =
                         ctx.get_pattern_mut(&p.identifier)?;
-                    pattern
-                        .make_non_anchorable()
-                        .mark_as_used()
-                        .disallow_fast_scan();
+                    pattern.mark_as_used().disallow_fast_scan();
                     ctx.ir.pattern_count(pattern_idx, Some(range))
                 }
                 (_, None) => {
                     let (pattern_idx, pattern) =
                         ctx.get_pattern_mut(&p.identifier)?;
-                    pattern
-                        .make_non_anchorable()
-                        .mark_as_used()
-                        .disallow_fast_scan();
+                    pattern.mark_as_used();
                     ctx.ir.pattern_count(pattern_idx, None)
                 }
             }
@@ -888,19 +867,13 @@ fn expr_from_ast<'src>(
                         integer_in_range_from_ast(ctx, index, 1..=i64::MAX)?;
                     let (pattern_idx, pattern) =
                         ctx.get_pattern_mut(&p.identifier)?;
-                    pattern
-                        .make_non_anchorable()
-                        .mark_as_used()
-                        .disallow_fast_scan();
+                    pattern.mark_as_used().disallow_fast_scan();
                     ctx.ir.pattern_offset(pattern_idx, Some(range))
                 }
                 (_, None) => {
                     let (pattern_idx, pattern) =
                         ctx.get_pattern_mut(&p.identifier)?;
-                    pattern
-                        .make_non_anchorable()
-                        .mark_as_used()
-                        .disallow_fast_scan();
+                    pattern.mark_as_used().disallow_fast_scan();
                     ctx.ir.pattern_offset(pattern_idx, None)
                 }
             }
@@ -936,19 +909,13 @@ fn expr_from_ast<'src>(
                         integer_in_range_from_ast(ctx, index, 1..=i64::MAX)?;
                     let (pattern_idx, pattern) =
                         ctx.get_pattern_mut(&p.identifier)?;
-                    pattern
-                        .make_non_anchorable()
-                        .mark_as_used()
-                        .disallow_fast_scan();
+                    pattern.mark_as_used().disallow_fast_scan();
                     ctx.ir.pattern_length(pattern_idx, Some(index))
                 }
                 (_, None) => {
                     let (pattern_idx, pattern) =
                         ctx.get_pattern_mut(&p.identifier)?;
-                    pattern
-                        .make_non_anchorable()
-                        .mark_as_used()
-                        .disallow_fast_scan();
+                    pattern.mark_as_used().disallow_fast_scan();
                     ctx.ir.pattern_length(pattern_idx, None)
                 }
             }
@@ -1028,9 +995,148 @@ pub(in crate::compiler) fn rule_condition_from_ast<'src>(
 
     ctx.ir.root = Some(condition);
 
+    // Now that the full IR tree has been built and every node's parent is
+    // recorded in `ctx.ir`, traverse the condition to compute the fast-scan
+    // match limit for each unbounded pattern count (`#a`).
+    //
+    // Unlike range-bounded counts (`#a in (..)`), offsets (`@a`), or lengths
+    // (`!a`)—which immediately disallow fast-scan during AST-to-IR conversion—
+    // the number of matches required for `#a` depends on its parent expression
+    // in the IR (e.g., `#a > 1000` requires 1001 matches, `#a < 1000` requires
+    // 1000 matches, while `#a == #b` requires tracking all matches).
+    for event in ctx.ir.dfs_iter(condition) {
+        if let dfs::Event::Enter((
+            expr_id,
+            Expr::PatternCount { pattern, range: None },
+            _,
+        )) = event
+        {
+            let limit = ctx.ir.required_matches_for_count(expr_id);
+            ctx.current_rule_patterns[pattern.as_usize()]
+                .update_max_matches_in_fast_scan(limit);
+        }
+    }
+
+    anchor_patterns(ctx);
     check_unintended_patterns_in_sets(ctx, &rule.condition);
 
     Ok(condition)
+}
+
+/// Traverses the rule's condition IR and determines which patterns can be
+/// anchored at a fixed offset.
+fn anchor_patterns(ctx: &mut CompileContext) {
+    // Identify patterns that are unconditionally required to match at a
+    // constant offset for the rule's condition to be true (e.g., `$a at 0`
+    // in `all of them and $a at 0`).
+    let mut top_level_anchors = vec![None; ctx.current_rule_patterns.len()];
+
+    ctx.ir.find_top_level_anchors(|pattern, offset| {
+        top_level_anchors[pattern.as_usize()] = Some(offset);
+    });
+
+    for event in ctx.ir.dfs_iter(ctx.ir.root.unwrap()) {
+        match event {
+            dfs::Event::Enter((
+                _,
+                Expr::PatternMatch { pattern, anchor },
+                _,
+            )) => match anchor {
+                // `$a at <expr>`: anchor `$a` if `<expr>` is a compile-time
+                // constant; otherwise `$a` cannot be anchored at a fixed
+                // offset.
+                MatchAnchor::At(expr) => {
+                    if let Some(offset) =
+                        ctx.ir.get(*expr).try_as_const_integer()
+                        && let Ok(offset) = usize::try_from(offset)
+                    {
+                        ctx.current_rule_patterns[pattern.as_usize()]
+                            .anchor_at(offset);
+                    } else {
+                        ctx.current_rule_patterns[pattern.as_usize()]
+                            .make_non_anchorable();
+                    }
+                }
+                // Unanchored `$a`: if `$a` is also anchored at the top level
+                // (e.g., `$a and $a at 0`), ignore this unanchored use so `$a`
+                // can remain anchored.
+                MatchAnchor::None
+                    if top_level_anchors[pattern.as_usize()].is_some() => {}
+                // `$a in (..)` or unanchored `$a` without a top-level anchor
+                // (e.g., `$a at 0 or $a`): `$a` can match at arbitrary offsets
+                // and must be marked non-anchorable.
+                _ => {
+                    ctx.current_rule_patterns[pattern.as_usize()]
+                        .make_non_anchorable();
+                }
+            },
+            dfs::Event::Enter((_, Expr::OfPatternSet(of), _)) => {
+                match of.anchor {
+                    // `<quantifier> of (<pattern set>) at <expr>`: anchor all
+                    // patterns in the set if `<expr>` is a constant, or mark
+                    // them non-anchorable otherwise.
+                    MatchAnchor::At(expr) => {
+                        let anchor_at =
+                            ctx.ir.get(expr).try_as_const_integer().and_then(
+                                |offset| usize::try_from(offset).ok(),
+                            );
+                        for pattern in &of.items {
+                            let pattern = &mut ctx.current_rule_patterns
+                                [pattern.as_usize()];
+                            if let Some(offset) = anchor_at {
+                                pattern.anchor_at(offset);
+                            } else {
+                                pattern.make_non_anchorable();
+                            }
+                        }
+                    }
+                    // Unanchored `<quantifier> of (<pattern set>)` (e.g.,
+                    // `all of them`): keep any pattern that has a top-level
+                    // anchor (such as `$dollar` in `all of them and $dollar at 0`)
+                    // anchorable, and mark the rest non-anchorable.
+                    MatchAnchor::None => {
+                        for pattern in &of.items {
+                            if top_level_anchors[pattern.as_usize()].is_none()
+                            {
+                                ctx.current_rule_patterns[pattern.as_usize()]
+                                    .make_non_anchorable();
+                            }
+                        }
+                    }
+                    // `<quantifier> of (<pattern set>) in (..)`: all patterns
+                    // in the set can match anywhere within the range and must
+                    // be marked non-anchorable.
+                    _ => {
+                        for pattern in &of.items {
+                            ctx.current_rule_patterns[pattern.as_usize()]
+                                .make_non_anchorable();
+                        }
+                    }
+                }
+            }
+            // Patterns referenced in `for <quantifier> of <pattern set> : (..)`
+            // cannot be anchored.
+            dfs::Event::Enter((_, Expr::ForOf(for_of), _)) => {
+                for pattern in &for_of.pattern_set {
+                    ctx.current_rule_patterns[pattern.as_usize()]
+                        .make_non_anchorable();
+                }
+            }
+            // `#a`, `@a`, and `!a` require finding matches across the input,
+            // so `$a` cannot be anchored.
+            dfs::Event::Enter((
+                _,
+                Expr::PatternCount { pattern, .. }
+                | Expr::PatternOffset { pattern, .. }
+                | Expr::PatternLength { pattern, .. },
+                _,
+            )) => {
+                ctx.current_rule_patterns[pattern.as_usize()]
+                    .make_non_anchorable();
+            }
+            _ => {}
+        }
+    }
 }
 
 fn bool_expr_from_ast<'src>(
@@ -1097,8 +1203,8 @@ fn bool_expr_from_ast<'src>(
                 None,
             ));
         }
-        type_value => {
-            warn_if_not_bool(ctx, type_value.ty(), ast.span());
+        _ => {
+            warn_if_not_bool(ctx, expr, ast.span());
         }
     }
 
@@ -1123,7 +1229,9 @@ fn of_expr_from_ast<'src>(
     ctx: &mut CompileContext<'_, 'src>,
     of: &ast::Of<'src>,
 ) -> Result<ExprId, CompileError> {
-    let quantifier = quantifier_from_ast(ctx, &of.quantifier)?;
+    // Reserve the loop's stack frame before compiling `quantifier` because
+    // `for_vars` (`n` and `i`) are already live in `emit_for` when `quantifier`
+    // is evaluated; see `for_in_expr_from_ast` for details.
     let mut stack_frame =
         ctx.vars.new_frame(VarStack::OF_FRAME_SIZE).ok_or_else(|| {
             TooManyVariables::build(
@@ -1131,6 +1239,7 @@ fn of_expr_from_ast<'src>(
                 ctx.report_builder.span_to_code_loc(of.span()),
             )
         })?;
+    let quantifier = quantifier_from_ast(ctx, &of.quantifier)?;
 
     let (items, next_item_var) = match &of.items {
         // `x of (<boolean expr>, <boolean expr>, ...)`
@@ -1230,18 +1339,18 @@ fn of_expr_from_ast<'src>(
             Quantifier::All => items.len() > 1,
             // `<expr> of <items> at <expr>: the warning is raised if <expr> is
             // 2 or more.
-            Quantifier::Expr(expr) => match ctx.ir.get(*expr).type_value() {
-                TypeValue::Integer { value: Const(value), .. } => value >= 2,
-                _ => false,
-            },
+            Quantifier::Expr(expr) => matches!(
+                ctx.ir.get(*expr).type_value().try_as_const_i128(),
+                Some(value) if value >= 2
+            ),
             // `<expr>% of <items> at <expr>: the warning is raised if the
             // <expr> percent of the items is 2 or more.
             Quantifier::Percentage(expr) => {
-                match ctx.ir.get(*expr).type_value() {
-                    TypeValue::Integer {
-                        value: Const(percentage), ..
-                    } => items.len() as f64 * percentage as f64 / 100.0 >= 2.0,
-                    _ => false,
+                match ctx.ir.get(*expr).type_value().try_as_const_i128() {
+                    Some(percentage) => {
+                        items.len() as f64 * percentage as f64 / 100.0 >= 2.0
+                    }
+                    None => false,
                 }
             }
             Quantifier::None | Quantifier::Any => false,
@@ -1261,22 +1370,12 @@ fn of_expr_from_ast<'src>(
 
     let anchor = anchor_from_ast(ctx, &of.anchor)?;
 
-    // When have `<quantifier> of <pattern set> at <anchor>`, all the patterns
-    // in the set must be anchored. If we have `<quantifier> of <pattern set>`
-    // all are marked as non-anchorable.
-    if let OfItems::PatternSet(ref pattern_set) = items {
-        let anchor_at = match anchor {
-            MatchAnchor::At(expr) => ctx.ir.get(expr).try_as_const_integer(),
-            _ => None,
-        };
+    if !matches!(anchor, MatchAnchor::None)
+        && let OfItems::PatternSet(ref pattern_set) = items
+    {
         for &pattern_idx in pattern_set {
-            let pattern =
-                &mut ctx.current_rule_patterns[pattern_idx.as_usize()];
-            if let Some(offset) = anchor_at {
-                pattern.anchor_at(offset as usize);
-            } else {
-                pattern.make_non_anchorable();
-            }
+            ctx.current_rule_patterns[pattern_idx.as_usize()]
+                .disallow_fast_scan();
         }
     }
 
@@ -1300,15 +1399,9 @@ fn for_of_expr_from_ast<'src>(
     ctx: &mut CompileContext<'_, 'src>,
     for_of: &ast::ForOf<'src>,
 ) -> Result<ExprId, CompileError> {
-    let quantifier = quantifier_from_ast(ctx, &for_of.quantifier)?;
-    let pattern_set = pattern_set_from_ast(ctx, &for_of.pattern_set)?;
-
-    // Patterns used in a `for .. of` expressions are marked as non-anchorable.
-    for &pattern_idx in &pattern_set {
-        ctx.current_rule_patterns[pattern_idx.as_usize()]
-            .make_non_anchorable();
-    }
-
+    // Reserve the loop's stack frame before compiling `quantifier` because
+    // `for_vars` (`n` and `i`) are already live in `emit_for` when `quantifier`
+    // is evaluated; see `for_in_expr_from_ast` for details.
     let mut stack_frame =
         ctx.vars.new_frame(VarStack::FOR_OF_FRAME_SIZE).ok_or_else(|| {
             TooManyVariables::build(
@@ -1316,6 +1409,9 @@ fn for_of_expr_from_ast<'src>(
                 ctx.report_builder.span_to_code_loc(for_of.span()),
             )
         })?;
+
+    let quantifier = quantifier_from_ast(ctx, &for_of.quantifier)?;
+    let pattern_set = pattern_set_from_ast(ctx, &for_of.pattern_set)?;
 
     let for_vars = ForVars {
         n: stack_frame.new_var(Type::Integer),
@@ -1331,7 +1427,7 @@ fn for_of_expr_from_ast<'src>(
         "$",
         Symbol::Var {
             var: for_vars.item,
-            type_value: TypeValue::unknown_integer(),
+            type_value: TypeValue::unknown_signed_integer(),
         },
     );
 
@@ -1340,32 +1436,53 @@ fn for_of_expr_from_ast<'src>(
 
     let body = bool_expr_from_ast(ctx, &for_of.body)?;
 
-    let mut allow_fast_scan = true;
+    // Traverse the loop's body to determine how the anonymous pattern variable
+    // (`$`, `#`, `@`, `!`) is used, and compute the fast-scan match limit that
+    // must be applied to all patterns in `pattern_set`:
+    //
+    // - By default, `max_matches` starts at 1 (suitable when the body only
+    //   performs un-anchored boolean checks like `$`).
+    // - If the body uses `@` (`PatternOffsetVar`), `!` (`PatternLengthVar`),
+    //   `# in (..)` (`PatternCountVar` with a range), or an anchored `$`
+    //   (`$ at ..` / `$ in (..)`), all matches must be tracked and we can stop
+    //   the traversal early.
+    // - If the body uses an unbounded `#` (`PatternCountVar` with `range: None`,
+    //   e.g. `# > 10`), `required_matches_for_count` inspects the parent
+    //   comparison node to determine how many matches are needed, and we keep
+    //   the maximum required count across all uses in the body.
+    let mut max_matches = NonZeroU32::new(1);
 
     for event in ctx.ir.dfs_iter(body) {
-        if let dfs::Event::Enter((_, expr, _)) = event
-            && (matches!(
-                expr,
-                Expr::PatternCountVar { .. }
-                    | Expr::PatternOffsetVar { .. }
-                    | Expr::PatternLengthVar { .. }
-            ) || (match expr {
-                Expr::PatternMatchVar { anchor, .. } => {
-                    !matches!(anchor, MatchAnchor::None)
+        if let dfs::Event::Enter((expr_id, expr, _)) = event {
+            let limit = match expr {
+                Expr::PatternOffsetVar { .. }
+                | Expr::PatternLengthVar { .. }
+                | Expr::PatternCountVar { range: Some(_), .. } => None,
+                Expr::PatternMatchVar { anchor, .. }
+                    if !matches!(anchor, MatchAnchor::None) =>
+                {
+                    None
                 }
-                _ => false,
-            }))
-        {
-            allow_fast_scan = false;
-            break;
+                Expr::PatternCountVar { range: None, .. } => {
+                    ctx.ir.required_matches_for_count(expr_id)
+                }
+                _ => continue,
+            };
+
+            max_matches = match (max_matches, limit) {
+                (Some(curr), Some(new)) => Some(curr.max(new)),
+                _ => None,
+            };
+
+            if max_matches.is_none() {
+                break;
+            }
         }
     }
 
-    if !allow_fast_scan {
-        for &pattern_idx in &pattern_set {
-            ctx.current_rule_patterns[pattern_idx.as_usize()]
-                .disallow_fast_scan();
-        }
+    for &pattern_idx in &pattern_set {
+        ctx.current_rule_patterns[pattern_idx.as_usize()]
+            .update_max_matches_in_fast_scan(max_matches);
     }
 
     ctx.for_of_depth -= 1;
@@ -1417,7 +1534,7 @@ fn is_potentially_large_range(ctx: &CompileContext, range: &Range) -> bool {
                     func.signature
                         .mangled_name
                         .as_str()
-                        .eq("math.min@a:i,b:i@i")
+                        .eq("math.min@a:i64,b:i64@i64")
                 } else {
                     false
                 }
@@ -1430,6 +1547,22 @@ fn for_in_expr_from_ast<'src>(
     ctx: &mut CompileContext<'_, 'src>,
     for_in: &ast::ForIn<'src>,
 ) -> Result<ExprId, CompileError> {
+    // Reserve the loop's stack frame before compiling `quantifier` and
+    // `iterable`. At runtime (`emit_for` / `emit_for_in_expr_tuple`), the
+    // loop's `for_vars` (`n` and `i`) are already initialized and live while
+    // `quantifier` and `iterable` tuple expressions are evaluated, so any
+    // nested `with`, `for`, or `of` inside them must get higher variable slots
+    // instead of reusing and overwriting `for_vars`. This also guarantees that
+    // all variables inside the loop's subtree have indices `>= for_vars.n`,
+    // which `IR::hoisting` relies on when shifting variables.
+    let mut stack_frame =
+        ctx.vars.new_frame(VarStack::FOR_IN_FRAME_SIZE).ok_or_else(|| {
+            TooManyVariables::build(
+                ctx.report_builder,
+                ctx.report_builder.span_to_code_loc(for_in.span()),
+            )
+        })?;
+
     let quantifier = quantifier_from_ast(ctx, &for_in.quantifier)?;
     let iterable = iterable_from_ast(ctx, &for_in.iterable)?;
 
@@ -1472,7 +1605,7 @@ fn for_in_expr_from_ast<'src>(
                     })
                 }
             }
-            (vec![TypeValue::unknown_integer()], Type::Unknown)
+            (vec![TypeValue::unknown_signed_integer()], Type::Unknown)
         }
         Iterable::ExprTuple(expressions) => {
             // All expressions in the tuple have the same type, we can use
@@ -1482,22 +1615,42 @@ fn for_in_expr_from_ast<'src>(
             // type as the first item in the tuple, but we don't want to
             // clone its actual value if known. The actual value for the
             // loop variable is not known until the loop is executed.
-            (
-                vec![
-                    expressions
-                        .first()
-                        .map(|node_idx| ctx.ir.get(*node_idx).type_value())
-                        .unwrap()
-                        .clone_without_value(),
-                ],
-                Type::Unknown,
-            )
+            let mut type_value = expressions
+                .first()
+                .map(|node_idx| ctx.ir.get(*node_idx).type_value())
+                .unwrap()
+                .clone_without_value();
+
+            // If the items are integers, the loop variable is unsigned when
+            // at least one of the items is unsigned, which is the same rule
+            // used for determining the signedness of arithmetic operations.
+            // In that case the signed items are interpreted as unsigned, and
+            // negative constants change their values.
+            if type_value.ty() == Type::Integer {
+                if ctx.ir.is_unsigned_result(expressions) {
+                    type_value = TypeValue::unknown_unsigned_integer();
+                    if let ast::Iterable::ExprTuple(items) = &for_in.iterable {
+                        for (item, ast_item) in iter::zip(expressions, items) {
+                            warn_if_sign_conversion(
+                                ctx,
+                                *item,
+                                ast_item.span(),
+                                &type_value,
+                            );
+                        }
+                    }
+                } else {
+                    type_value = TypeValue::unknown_signed_integer();
+                }
+            }
+
+            (vec![type_value], Type::Unknown)
         }
         Iterable::Expr(expr) => match ctx.ir.get(*expr).type_value() {
             TypeValue::Array(array) => (vec![array.deputy()], Type::Array),
             TypeValue::Map(map) => match map.as_ref() {
                 Map::IntegerKeys { .. } => (
-                    vec![TypeValue::unknown_integer(), map.deputy()],
+                    vec![TypeValue::unknown_signed_integer(), map.deputy()],
                     Type::Map,
                 ),
                 Map::StringKeys { .. } => (
@@ -1526,14 +1679,6 @@ fn for_in_expr_from_ast<'src>(
             ctx.report_builder.span_to_code_loc(span),
         ));
     }
-
-    let mut stack_frame =
-        ctx.vars.new_frame(VarStack::FOR_IN_FRAME_SIZE).ok_or_else(|| {
-            TooManyVariables::build(
-                ctx.report_builder,
-                ctx.report_builder.span_to_code_loc(for_in.span()),
-            )
-        })?;
 
     let for_vars = ForVars {
         n: stack_frame.new_var(Type::Integer),
@@ -1721,12 +1866,9 @@ fn range_from_ast<'src>(
     // that lower_bound <= upper_bound. If they are not know (because they are
     // variables, for example) we can't raise an error at compile time, but it
     // will be handled at scan time.
-    if let (
-        TypeValue::Integer { value: Const(lower_bound), .. },
-        TypeValue::Integer { value: Const(upper_bound), .. },
-    ) = (
-        ctx.ir.get(lower_bound).type_value(),
-        ctx.ir.get(upper_bound).type_value(),
+    if let (Some(lower_bound), Some(upper_bound)) = (
+        ctx.ir.get(lower_bound).type_value().try_as_const_i128(),
+        ctx.ir.get(upper_bound).type_value().try_as_const_i128(),
     ) && lower_bound > upper_bound
     {
         return Err(InvalidRange::build(
@@ -1750,14 +1892,20 @@ fn non_negative_integer_from_ast<'src>(
 
     check_type(ctx, expr, span.clone(), &[Type::Integer])?;
 
-    let type_value = ctx.ir.get(expr).type_value();
-    if let TypeValue::Integer { value: Const(value), .. } = type_value
-        && value < 0
-    {
-        return Err(UnexpectedNegativeNumber::build(
-            ctx.report_builder,
-            ctx.report_builder.span_to_code_loc(span),
-        ));
+    if let Some(value) = ctx.ir.get(expr).type_value().try_as_const_i128() {
+        if value < 0 {
+            return Err(UnexpectedNegativeNumber::build(
+                ctx.report_builder,
+                ctx.report_builder.span_to_code_loc(span),
+            ));
+        } else if value > i64::MAX as i128 {
+            return Err(NumberOutOfRange::build(
+                ctx.report_builder,
+                0,
+                i64::MAX,
+                ctx.report_builder.span_to_code_loc(span),
+            ));
+        }
     }
 
     Ok(expr)
@@ -1775,10 +1923,8 @@ fn integer_in_range_from_ast<'src>(
 
     // If the value is known at compile time make sure that it is within
     // the given range.
-    let type_value = ctx.ir.get(expr).type_value();
-
-    if let TypeValue::Integer { value: Const(value), .. } = type_value
-        && !range.contains(&value)
+    if let Some(value) = ctx.ir.get(expr).type_value().try_as_const_i128()
+        && !(*range.start() as i128..=*range.end() as i128).contains(&value)
     {
         return Err(NumberOutOfRange::build(
             ctx.report_builder,
@@ -2148,11 +2294,11 @@ fn check_unintended_patterns_in_sets<'src>(
         for expr in branch.exprs() {
             match expr {
                 // Direct pattern match (e.g. `$s1` or `$s1 at 100`).
-                ast::Expr::PatternMatch(pm) => {
-                    if !pm.identifier.name.is_empty() {
-                        explicit_patterns
-                            .push((pm.identifier.name, pm.identifier.span()));
-                    }
+                ast::Expr::PatternMatch(pm)
+                    if !pm.identifier.name.is_empty() =>
+                {
+                    explicit_patterns
+                        .push((pm.identifier.name, pm.identifier.span()));
                 }
                 // Pattern set in `of` expressions (e.g. `1 of ($s1, $s*)`).
                 ast::Expr::Of(of) => {
@@ -2364,6 +2510,22 @@ fn func_call_from_ast<'src>(
 
     let matching_signature = matching_signature.unwrap();
 
+    // Arguments are passed to functions as they are, so an unsigned constant
+    // greater than i64::MAX is received as a negative number by a function
+    // that expects a signed integer. In methods, the first argument in the
+    // signature is the object, which doesn't appear among the arguments.
+    let params = if matching_signature.method_of().is_some() {
+        &matching_signature.args[1..]
+    } else {
+        &matching_signature.args[..]
+    };
+
+    for ((arg, ast_arg), (_, param)) in
+        iter::zip(iter::zip(&args, &func_call.args), params)
+    {
+        warn_if_sign_conversion(ctx, *arg, ast_arg.span(), param);
+    }
+
     // The object is necessary only when this is a method call, if this
     // is a function call no object is required.
     if matching_signature.method_of().is_none() {
@@ -2554,12 +2716,36 @@ fn re_error_to_compile_error(
     }
 }
 
-/// Produce a warning if the expression is not boolean.
-pub(in crate::compiler) fn warn_if_not_bool(
+/// Raises a [`warnings::UnsignedUnaryOperation`] warning if `operand` is an
+/// unsigned integer. `operator` is the unary operator applied to `operand`,
+/// either `-` or `~`.
+fn warn_if_unsigned(
     ctx: &mut CompileContext,
-    ty: Type,
+    operand: ExprId,
     span: Span,
+    operator: char,
 ) {
+    if ctx.ir.get(operand).type_value().is_unsigned() {
+        ctx.warnings.add(|| {
+            let note = match operator {
+                '-' => "the result is a signed integer, which wraps around if the unsigned value is greater than 0x7FFFFFFFFFFFFFFF",
+                '~' => "the result is an unsigned integer with all its 64 bits inverted",
+                _ => unreachable!("unexpected unary operator `{operator}`"),
+            };
+            warnings::UnsignedUnaryOperation::build(
+                ctx.report_builder,
+                operator.to_string(),
+                ctx.report_builder.span_to_code_loc(span),
+                Some(note.to_string()),
+            )
+        });
+    }
+}
+
+/// Raises a [`warnings::NonBooleanAsBoolean`] warning if `expr` is not
+/// boolean.
+fn warn_if_not_bool(ctx: &mut CompileContext, expr: ExprId, span: Span) {
+    let ty = ctx.ir.get(expr).ty();
     if !matches!(ty, Type::Bool) {
         ctx.warnings.add(|| {
             let note = match ty {
@@ -2585,6 +2771,48 @@ pub(in crate::compiler) fn warn_if_not_bool(
             )
         });
     }
+}
+
+/// Raises a [`warnings::SignConversion`] warning if `expr` is an integer
+/// constant that changes its value when converted to the type of `target`.
+///
+/// This happens with negative constants converted to unsigned, and with
+/// unsigned constants greater than `i64::MAX` converted to signed. Unsigned
+/// targets are the result of mixing signed and unsigned integers, while
+/// signed targets are function arguments.
+fn warn_if_sign_conversion(
+    ctx: &mut CompileContext,
+    expr: ExprId,
+    span: Span,
+    target: &TypeValue,
+) {
+    if target.ty() != Type::Integer {
+        return;
+    }
+
+    let Some(value) = ctx.ir.get(expr).type_value().try_as_const_i128() else {
+        return;
+    };
+
+    let (converted_value, note) = if target.is_unsigned() && value < 0 {
+        (
+            (value as u64).to_string(),
+            "signed integers are converted to unsigned when mixed with unsigned integers",
+        )
+    } else if !target.is_unsigned() && value > i64::MAX as i128 {
+        ((value as i64).to_string(), "the function expects a signed integer")
+    } else {
+        return;
+    };
+
+    ctx.warnings.add(|| {
+        warnings::SignConversion::build(
+            ctx.report_builder,
+            converted_value,
+            ctx.report_builder.span_to_code_loc(span),
+            Some(note.to_string()),
+        )
+    });
 }
 
 macro_rules! gen_unary_op {
@@ -2678,7 +2906,7 @@ macro_rules! gen_string_op {
 }
 
 macro_rules! gen_n_ary_operation {
-    ($name:ident, $variant:ident, $( $accepted_types:path )|+, $compatible_types:expr, $check_fn:expr) => {
+    ($name:ident, $variant:ident, $( $accepted_types:path )|+, $compatible_types:expr, $check_fn:expr, $operands_check_fn:expr) => {
         fn $name<'src>(
             ctx: &mut CompileContext<'_, 'src>,
             expr: &ast::NAryExpr<'src>,
@@ -2717,6 +2945,18 @@ macro_rules! gen_n_ary_operation {
                 )?;
             }
 
+            // Unlike `check_fn`, which checks the operands one by one,
+            // `operands_check_fn` receives all the operands at once.
+            let operands_check_fn:
+                Option<fn(&mut CompileContext, &[ExprId], &[Span]) -> Result<(), CompileError>>
+                = $operands_check_fn;
+
+            if let Some(operands_check_fn) = operands_check_fn {
+                let spans: Vec<Span> =
+                    expr.operands().map(|operand| operand.span()).collect();
+                operands_check_fn(ctx, &operands_hir, &spans)?;
+            }
+
             ctx.ir.$variant(operands_hir).map_err(|err| {
                 match err {
                     Error::NumberOutOfRange => {
@@ -2748,8 +2988,7 @@ gen_unary_op!(
     Type::Bool | Type::Integer | Type::Float | Type::String,
     // Raise warning if the operand is not bool.
     Some(|ctx, operand, span| {
-        let ty = ctx.ir.get(operand).ty();
-        warn_if_not_bool(ctx, ty, span);
+        warn_if_not_bool(ctx, operand, span);
         Ok(())
     })
 );
@@ -2771,10 +3010,10 @@ gen_n_ary_operation!(
         (Type::Float, Type::Bool)
     ],
     Some(|ctx, operand, span| {
-        let ty = ctx.ir.get(operand).ty();
-        warn_if_not_bool(ctx, ty, span);
+        warn_if_not_bool(ctx, operand, span);
         Ok(())
-    })
+    }),
+    None
 );
 
 fn or_expr_from_ast<'src>(
@@ -2802,8 +3041,7 @@ fn or_expr_from_ast<'src>(
         .collect::<Result<Vec<ExprId>, CompileError>>()?;
 
     for (hir, ast) in iter::zip(or_operands.iter(), expr.operands()) {
-        let ty = ctx.ir.get(*hir).ty();
-        warn_if_not_bool(ctx, ty, ast.span());
+        warn_if_not_bool(ctx, *hir, ast.span());
     }
 
     for ((lhs_hir, lhs_ast), (rhs_hir, rhs_ast)) in
@@ -2820,66 +3058,7 @@ fn or_expr_from_ast<'src>(
         )?;
     }
 
-    // Group `matches` expressions by their left-side operand. All the `matches`
-    // expressions sharing the same left-side operand will be aggregated together
-    // into a MatchMany operation that matches the left-side operand against
-    // a set of regular expressions.
-    let mut matches_by_lhs: FxHashMap<u64, Vec<(usize, ExprId, RegexId)>> =
-        FxHashMap::default();
-
-    for (i, &op) in or_operands.iter().enumerate() {
-        if let Expr::Matches { lhs, rhs } = ctx.ir.get(op)
-            && let Expr::Const(TypeValue::Regexp(Some(re))) = ctx.ir.get(*rhs)
-        {
-            let mut hasher = FxHasher::default();
-            for evt in ctx.ir.dfs_iter(*lhs) {
-                if let dfs::Event::Enter((_, expr, _)) = evt {
-                    Hash::hash(expr, &mut hasher);
-                }
-            }
-            let lhs_expr_hash = hasher.finish();
-            let re_id = ctx.regex_pool.get_or_intern(re.as_str());
-            matches_by_lhs
-                .entry(lhs_expr_hash)
-                .or_default()
-                .push((i, *lhs, re_id));
-        }
-    }
-
-    // Collapse grouped regular expressions into `MatchesMany`. For any target
-    // expression associated with two or more regular expressions, construct a
-    // unified `RegexSet`, replace the individual `matches` nodes with a single
-    // `MatchesMany` expression, and record the collapsed indices.
-    let mut final_operands = Vec::new();
-    let mut collapsed_indices = FxHashSet::default();
-
-    for (_, group) in matches_by_lhs {
-        if group.len() >= 2 {
-            let set_id = RegexSetId::from(ctx.regex_sets.len() as i32);
-            let re_ids: Vec<_> =
-                group.iter().map(|&(_, _, re_id)| re_id).collect();
-            ctx.regex_sets.insert(set_id, re_ids);
-
-            let first_lhs = group[0].1;
-            let multimatch = ctx.ir.matches_regex_set(first_lhs, set_id);
-
-            final_operands.push(multimatch);
-
-            for (i, _, _) in group {
-                collapsed_indices.insert(i);
-            }
-        }
-    }
-
-    // Assemble final operands and construct the `or` expression. Preserve all
-    // non-collapsed operands in their original relative order. If all operands
-    // collapse into a single expression, return it directly without a wrapping
-    // `or` node.
-    for (i, &op) in or_operands.iter().enumerate() {
-        if !collapsed_indices.contains(&i) {
-            final_operands.push(op);
-        }
-    }
+    let final_operands = collapse_or_operands(ctx, &or_operands);
 
     if final_operands.len() == 1 {
         return Ok(final_operands[0]);
@@ -2895,13 +3074,226 @@ fn or_expr_from_ast<'src>(
     })
 }
 
-gen_unary_op!(minus_expr_from_ast, minus, Type::Integer | Type::Float, None);
+/// Analyzes the operands of an `or` expression and collapses multiple `matches`
+/// or string comparison operations sharing the same target operand and operator
+/// into a single `*Many` expression backed by a `RegexSet` or `LiteralSet`.
+fn collapse_or_operands(
+    ctx: &mut CompileContext,
+    or_operands: &[ExprId],
+) -> Vec<ExprId> {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum OpKind {
+        Matches,
+        Eq,
+        IEquals,
+        Contains,
+        IContains,
+        StartsWith,
+        IStartsWith,
+        EndsWith,
+        IEndsWith,
+    }
 
+    let is_const_str = |expr: &Expr| {
+        matches!(expr, Expr::Const(TypeValue::String { value: Const(_), .. }))
+    };
+
+    // Group `matches` and string comparison expressions by their operator kind
+    // and target operand hash.
+    let mut groups = IndexMap::new();
+
+    for (i, &op) in or_operands.iter().enumerate() {
+        let matched = match ctx.ir.get(op) {
+            Expr::Matches { lhs, rhs }
+                if matches!(
+                    ctx.ir.get(*rhs),
+                    Expr::Const(TypeValue::Regexp(Some(_)))
+                ) =>
+            {
+                Some((OpKind::Matches, *lhs, *rhs))
+            }
+            Expr::Eq { lhs, rhs } => {
+                if is_const_str(ctx.ir.get(*rhs)) {
+                    Some((OpKind::Eq, *lhs, *rhs))
+                } else if is_const_str(ctx.ir.get(*lhs)) {
+                    Some((OpKind::Eq, *rhs, *lhs))
+                } else {
+                    None
+                }
+            }
+            Expr::IEquals { lhs, rhs } => {
+                if is_const_str(ctx.ir.get(*rhs)) {
+                    Some((OpKind::IEquals, *lhs, *rhs))
+                } else if is_const_str(ctx.ir.get(*lhs)) {
+                    Some((OpKind::IEquals, *rhs, *lhs))
+                } else {
+                    None
+                }
+            }
+            Expr::Contains { lhs, rhs } if is_const_str(ctx.ir.get(*rhs)) => {
+                Some((OpKind::Contains, *lhs, *rhs))
+            }
+            Expr::IContains { lhs, rhs } if is_const_str(ctx.ir.get(*rhs)) => {
+                Some((OpKind::IContains, *lhs, *rhs))
+            }
+            Expr::StartsWith { lhs, rhs }
+                if is_const_str(ctx.ir.get(*rhs)) =>
+            {
+                Some((OpKind::StartsWith, *lhs, *rhs))
+            }
+            Expr::IStartsWith { lhs, rhs }
+                if is_const_str(ctx.ir.get(*rhs)) =>
+            {
+                Some((OpKind::IStartsWith, *lhs, *rhs))
+            }
+            Expr::EndsWith { lhs, rhs } if is_const_str(ctx.ir.get(*rhs)) => {
+                Some((OpKind::EndsWith, *lhs, *rhs))
+            }
+            Expr::IEndsWith { lhs, rhs } if is_const_str(ctx.ir.get(*rhs)) => {
+                Some((OpKind::IEndsWith, *lhs, *rhs))
+            }
+            _ => None,
+        };
+
+        if let Some((kind, lhs, rhs)) = matched {
+            let mut hasher = FxHasher::default();
+            for evt in ctx.ir.dfs_iter(lhs) {
+                if let dfs::Event::Enter((_, expr, _)) = evt {
+                    Hash::hash(expr, &mut hasher);
+                }
+            }
+            let lhs_expr_hash = hasher.finish();
+            groups
+                .entry((kind, lhs_expr_hash))
+                .or_insert_with(Vec::new)
+                .push((i, lhs, rhs));
+        }
+    }
+
+    let mut final_operands = Vec::new();
+    let mut collapsed_indices = FxHashSet::default();
+
+    for ((kind, _), group) in groups {
+        if group.len() >= 2 {
+            let first_lhs = group[0].1;
+            let collapsed_expr = if kind == OpKind::Matches {
+                let parser = re::parser::Parser::new()
+                    .relaxed_re_syntax(ctx.relaxed_re_syntax);
+                let mut hirs = Vec::with_capacity(group.len());
+                let mut re_ids = Vec::with_capacity(group.len());
+
+                for &(_, _, rhs) in &group {
+                    let re = ctx.ir.get(rhs).as_const().as_regexp();
+                    // `unwrap()` is safe because `re` comes from an
+                    // `ast::Expr::Regexp` operand that was already parsed and
+                    // validated with the same `relaxed_re_syntax` setting.
+                    hirs.push(parser.parse(re).unwrap());
+                    re_ids.push(ctx.regex_pool.get_or_intern(re.as_str()));
+                }
+
+                // Skip collapsing into `MatchesMany` if the combined NFA would
+                // exceed the size limit, keeping the individual `Matches`
+                // expressions intact.
+                if re::hir::Hir::build_automata(&hirs).is_err() {
+                    continue;
+                }
+
+                let set_id = RegexSetId::from(ctx.regex_sets.len() as i32);
+                ctx.regex_sets.insert(set_id, re_ids);
+                ctx.ir.matches_regex_set(first_lhs, set_id)
+            } else {
+                let set_id = LiteralSetId::from(ctx.literal_sets.len() as i32);
+                let lit_ids: Vec<_> = group
+                    .iter()
+                    .map(|&(_, _, rhs)| {
+                        let s = ctx.ir.get(rhs).as_const().as_string();
+                        ctx.literal_pool.get_or_intern(s.as_bstr())
+                    })
+                    .collect();
+                ctx.literal_sets.insert(set_id, lit_ids);
+                match kind {
+                    OpKind::Eq => ctx.ir.eq_many(first_lhs, set_id),
+                    OpKind::IEquals => ctx.ir.iequals_many(first_lhs, set_id),
+                    OpKind::Contains => {
+                        ctx.ir.contains_many(first_lhs, set_id)
+                    }
+                    OpKind::IContains => {
+                        ctx.ir.icontains_many(first_lhs, set_id)
+                    }
+                    OpKind::StartsWith => {
+                        ctx.ir.starts_with_many(first_lhs, set_id)
+                    }
+                    OpKind::IStartsWith => {
+                        ctx.ir.istarts_with_many(first_lhs, set_id)
+                    }
+                    OpKind::EndsWith => {
+                        ctx.ir.ends_with_many(first_lhs, set_id)
+                    }
+                    OpKind::IEndsWith => {
+                        ctx.ir.iends_with_many(first_lhs, set_id)
+                    }
+                    OpKind::Matches => unreachable!(),
+                }
+            };
+
+            final_operands.push(collapsed_expr);
+
+            for (i, _, _) in group {
+                collapsed_indices.insert(i);
+            }
+        }
+    }
+
+    // Preserve all non-collapsed operands in their original relative order.
+    for (i, &op) in or_operands.iter().enumerate() {
+        if !collapsed_indices.contains(&i) {
+            final_operands.push(op);
+        }
+    }
+
+    final_operands
+}
+
+fn minus_expr_from_ast<'src>(
+    ctx: &mut CompileContext<'_, 'src>,
+    expr: &ast::UnaryExpr<'src>,
+) -> Result<ExprId, CompileError> {
+    let operand = expr_from_ast(ctx, &expr.operand)?;
+
+    check_type(
+        ctx,
+        operand,
+        expr.operand.span(),
+        &[Type::Integer, Type::Float],
+    )?;
+
+    // Negating a constant fails if the result doesn't fit in a signed
+    // integer, as in `-(-9223372036854775808)` or `-(0xFFFFFFFFFFFFFFFF)`.
+    let minus = ctx.ir.minus(operand).map_err(|err| match err {
+        Error::NumberOutOfRange => NumberOutOfRange::build(
+            ctx.report_builder,
+            i64::MIN,
+            i64::MAX,
+            ctx.report_builder.span_to_code_loc(expr.span()),
+        ),
+    })?;
+
+    warn_if_unsigned(ctx, operand, expr.operand.span(), '-');
+
+    Ok(minus)
+}
+
+// In additions, subtractions and multiplications, converting a negative
+// constant to unsigned doesn't change the result, because these operations
+// produce the same bits with signed and unsigned operands. For instance,
+// `uint64(0) + -1` is the same as `uint64(0) - 1`. This is not true for
+// divisions and remainders, which are checked by `div_check`.
 gen_n_ary_operation!(
     add_expr_from_ast,
     add,
     Type::Integer | Type::Float,
     &[(Type::Integer, Type::Float)],
+    None,
     None
 );
 
@@ -2910,6 +3302,7 @@ gen_n_ary_operation!(
     sub,
     Type::Integer | Type::Float,
     &[(Type::Integer, Type::Float)],
+    None,
     None
 );
 
@@ -2918,6 +3311,7 @@ gen_n_ary_operation!(
     mul,
     Type::Integer | Type::Float,
     &[(Type::Integer, Type::Float)],
+    None,
     None
 );
 
@@ -2926,12 +3320,28 @@ gen_n_ary_operation!(
     div,
     Type::Integer | Type::Float,
     &[(Type::Integer, Type::Float)],
-    None
+    None,
+    Some(div_check)
 );
 
-gen_n_ary_operation!(mod_expr_from_ast, modulus, Type::Integer, &[], None);
+gen_n_ary_operation!(
+    mod_expr_from_ast,
+    modulus,
+    Type::Integer,
+    &[],
+    None,
+    Some(div_check)
+);
 
-gen_unary_op!(bitwise_not_expr_from_ast, bitwise_not, Type::Integer, None);
+gen_unary_op!(
+    bitwise_not_expr_from_ast,
+    bitwise_not,
+    Type::Integer,
+    Some(|ctx, operand, span| {
+        warn_if_unsigned(ctx, operand, span, '~');
+        Ok(())
+    })
+);
 
 gen_binary_op!(shl_expr_from_ast, shl, Type::Integer, &[], Some(shx_check));
 gen_binary_op!(shr_expr_from_ast, shr, Type::Integer, &[], Some(shx_check));
@@ -3129,41 +3539,60 @@ fn eq_check(
             }
         };
 
-    let check_integer_constraints =
+    let check_integer_range =
         |ctx: &mut CompileContext,
-         const_integer: i64,
+         const_integer: i128,
          const_integer_span: Span,
-         constraints: Vec<IntegerConstraint>,
-         constrained_integer_span: Span| {
-            for constraint in constraints {
-                match constraint {
-                    IntegerConstraint::Range(min, max)
-                        if !(min..=max).contains(&const_integer) =>
-                    {
-                        ctx.warnings.add(|| {
-                                UnsatisfiableExpression::build(
-                                    ctx.report_builder,
-                                    format!(
-                                        "this expression is an integer in the range [{min},{max}]",
-                                    ),
-                                    format!(
-                                        "this integer is outside the range [{min},{max}]",
-                                    ),
-                                    ctx.report_builder.span_to_code_loc(
-                                        constrained_integer_span.clone(),
-                                    ),
-                                    ctx.report_builder.span_to_code_loc(
-                                        const_integer_span.clone(),
-                                    ),
-                                    None,
-                                )
-                            });
-                    }
-
-                    _ => {}
-                }
+         (min, max): (i128, i128),
+         ranged_integer_span: Span| {
+            if !(min..=max).contains(&const_integer) {
+                ctx.warnings.add(|| {
+                    UnsatisfiableExpression::build(
+                        ctx.report_builder,
+                        format!(
+                            "this expression is an integer in the range [{min},{max}]",
+                        ),
+                        format!(
+                            "this integer is outside the range [{min},{max}]",
+                        ),
+                        ctx.report_builder
+                            .span_to_code_loc(ranged_integer_span.clone()),
+                        ctx.report_builder
+                            .span_to_code_loc(const_integer_span.clone()),
+                        None,
+                    )
+                });
             }
         };
+
+    // Integer constants compared with non-constant integers, whose values
+    // are limited to the range of their types. Both the constant and the
+    // non-constant integer can be signed or unsigned. Comparisons between
+    // two constants are not checked, the range of a constant's type is
+    // irrelevant because its value is known.
+    if !rhs.is_const()
+        && let (Some(const_integer), Some(range)) =
+            (lhs.try_as_const_i128(), rhs.integer_range())
+    {
+        check_integer_range(
+            ctx,
+            const_integer,
+            lhs_span.clone(),
+            range,
+            rhs_span.clone(),
+        );
+    } else if !lhs.is_const()
+        && let (Some(range), Some(const_integer)) =
+            (lhs.integer_range(), rhs.try_as_const_i128())
+    {
+        check_integer_range(
+            ctx,
+            const_integer,
+            rhs_span.clone(),
+            range,
+            lhs_span.clone(),
+        );
+    }
 
     match (lhs, rhs, lhs_span, rhs_span) {
         (
@@ -3184,24 +3613,6 @@ fn eq_check(
             constraints,
             constrained_string_span,
         ),
-        (
-            TypeValue::Integer { value: Const(const_integer), .. },
-            TypeValue::Integer { constraints: Some(constraints), .. },
-            const_integer_span,
-            constrained_integer_span,
-        )
-        | (
-            TypeValue::Integer { constraints: Some(constraints), .. },
-            TypeValue::Integer { value: Const(const_integer), .. },
-            constrained_integer_span,
-            const_integer_span,
-        ) => check_integer_constraints(
-            ctx,
-            const_integer,
-            const_integer_span,
-            constraints,
-            constrained_integer_span,
-        ),
         _ => {}
     };
 
@@ -3216,8 +3627,7 @@ fn shx_check(
     _lhs_span: Span,
     rhs_span: Span,
 ) -> Result<(), CompileError> {
-    if let TypeValue::Integer { value: Const(value), .. } =
-        ctx.ir.get(rhs).type_value()
+    if let Some(value) = ctx.ir.get(rhs).type_value().try_as_const_i128()
         && value < 0
     {
         return Err(UnexpectedNegativeNumber::build(
@@ -3225,5 +3635,46 @@ fn shx_check(
             ctx.report_builder.span_to_code_loc(rhs_span),
         ));
     }
+    Ok(())
+}
+
+/// Checks the operands for division and remainder operations.
+///
+/// The operations in an expression like `a \ b \ c` are performed from left
+/// to right, and each of them is unsigned if any of the operands involved so
+/// far is unsigned. Negative constants that participate in an unsigned
+/// operation are converted to unsigned, which changes their values. Those are
+/// the right operand of each operation, and the left operand of the first one.
+/// Once a float is involved, the remaining operations are performed with
+/// floats and no conversion to unsigned takes place.
+fn div_check(
+    ctx: &mut CompileContext,
+    operands: &[ExprId],
+    spans: &[Span],
+) -> Result<(), CompileError> {
+    let unsigned = TypeValue::unknown_unsigned_integer();
+
+    for i in 1..operands.len() {
+        let involved = &operands[..=i];
+
+        if involved.iter().any(|op| ctx.ir.get(*op).ty() == Type::Float) {
+            break;
+        }
+
+        if ctx.ir.is_unsigned_result(involved) {
+            let first = if i == 1 { 0 } else { i };
+            for (operand, span) in
+                iter::zip(&operands[first..=i], &spans[first..=i])
+            {
+                warn_if_sign_conversion(
+                    ctx,
+                    *operand,
+                    span.clone(),
+                    &unsigned,
+                );
+            }
+        }
+    }
+
     Ok(())
 }

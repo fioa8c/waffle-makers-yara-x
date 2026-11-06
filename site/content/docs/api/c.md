@@ -54,9 +54,10 @@ test program, like this:
 
 ```shell
 cat <<EOF > test.c
+#include <stddef.h>
 #include <yara_x.h>
 int main() {
-    YRX_RULES* rules;
+    YRX_RULES* rules = NULL;
     yrx_compile("rule dummy { condition: true }", &rules);
     yrx_rules_destroy(rules);
 }
@@ -1083,8 +1084,13 @@ object has a pointer to an array of these structures.
 
 ```c
 typedef struct YRX_MATCH {
+    // Offset within the data where the match occurred.
     size_t offset;
+    // Length of the match.
     size_t length;
+    // XOR key used for decrypting the data if the pattern had the `xor`
+    // modifier, or -1 if otherwise.
+    int16_t xor_key;
 } YRX_MATCH;
 ```
 

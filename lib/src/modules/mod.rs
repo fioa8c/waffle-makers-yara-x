@@ -296,6 +296,15 @@ pub mod mods {
     /// Data structure returned by the `pe` module.
     pub use super::protos::pe::PE;
 
+    /// Data structures defined by the `zip` module.
+    ///
+    /// The main structure produced by the module is [`zip::Zip`]. The rest
+    /// of them are used by one or more fields in the main structure.
+    ///
+    pub use super::protos::zip;
+    /// Data structure returned by the `zip` module.
+    pub use super::protos::zip::Zip;
+
     /// A data structure containing the data returned by all modules.
     pub use super::protos::mods::Modules;
 
@@ -391,6 +400,7 @@ pub mod mods {
         info.crx = protobuf::MessageField(invoke::<Crx>(data));
         info.dex = protobuf::MessageField(invoke::<Dex>(data));
         info.msi = protobuf::MessageField(invoke::<Msi>(data));
+        info.zip = protobuf::MessageField(invoke::<Zip>(data));
         info
     }
 
@@ -478,7 +488,7 @@ pub mod mods {
             pub fn fields(&self) -> impl Iterator<Item = Field<'_>> + '_ {
                 self.inner
                     .fields()
-                    .map(|(name, field)| Field::new(name, field))
+                    .map(|(name, field, meta)| Field::new(name, field, meta))
             }
         }
 
@@ -547,14 +557,16 @@ pub mod mods {
         pub struct Field<'a> {
             name: &'a str,
             struct_field: &'a types::StructField,
+            meta: &'a types::StructFieldMeta,
         }
 
         impl<'a> Field<'a> {
             fn new(
                 name: &'a str,
                 struct_field: &'a types::StructField,
+                meta: &'a types::StructFieldMeta,
             ) -> Self {
-                Self { name, struct_field }
+                Self { name, struct_field, meta }
             }
 
             /// Returns the name of the field.
@@ -564,17 +576,17 @@ pub mod mods {
 
             /// Returns the type of the field.
             pub fn ty(&self) -> Type {
-                Type::from(&self.struct_field.type_value)
+                Type::from(self.struct_field.type_value())
             }
 
             /// Returns true if the field is a constant.
             pub fn is_const(&self) -> bool {
-                self.struct_field.type_value.is_const()
+                self.struct_field.type_value().is_const()
             }
 
             /// Returns the documentation for the current field.
             pub fn doc(&self) -> Option<&str> {
-                self.struct_field.doc
+                self.meta.doc
             }
         }
 
@@ -606,7 +618,14 @@ pub mod mods {
                 match type_value {
                     TypeValue::Bool { .. } => Type::Bool,
                     TypeValue::Float { .. } => Type::Float,
-                    TypeValue::Integer { .. } => Type::Integer,
+                    TypeValue::Int8(_)
+                    | TypeValue::Int16(_)
+                    | TypeValue::Int32(_)
+                    | TypeValue::Int64(_)
+                    | TypeValue::Uint8(_)
+                    | TypeValue::Uint16(_)
+                    | TypeValue::Uint32(_)
+                    | TypeValue::Uint64(_) => Type::Integer,
                     TypeValue::String { .. } => Type::String,
                     TypeValue::Regexp(_) => Type::Regexp,
                     TypeValue::Struct(s) => {

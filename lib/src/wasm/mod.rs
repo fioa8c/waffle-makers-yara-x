@@ -94,7 +94,6 @@ use crate::scanner::{RuntimeObjectHandle, ScanContext};
 use crate::types::{
     Array, Func, FuncSignature, Map, Struct, TypeValue, Value,
 };
-use crate::wasm::integer::RangedInteger;
 use crate::wasm::runtime::{
     AsContext, AsContextMut, Caller, Config, Engine, FuncType, Linker,
     Trampoline, TrampolineResult, ValRaw, ValType,
@@ -104,7 +103,6 @@ use crate::wasm::string::String as _;
 use crate::{ScanError, wasm};
 
 pub(crate) mod builder;
-pub(crate) mod integer;
 pub(crate) mod runtime;
 pub(crate) mod string;
 
@@ -430,35 +428,23 @@ impl WasmResult for () {
     }
 }
 
-impl WasmResult for i32 {
-    fn values(self, _: &mut ScanContext) -> WasmResultArray<ValRaw> {
-        smallvec![ValRaw::i32(self)]
-    }
+macro_rules! impl_wasm_result_for_int {
+    ($($ty:ty),*) => {
+        $(
+            impl WasmResult for $ty {
+                fn values(self, _: &mut ScanContext) -> WasmResultArray<ValRaw> {
+                    smallvec![ValRaw::i64(self as i64)]
+                }
 
-    fn types() -> WasmResultArray<ValType> {
-        smallvec![ValType::I32]
-    }
+                fn types() -> WasmResultArray<ValType> {
+                    smallvec![ValType::I64]
+                }
+            }
+        )*
+    };
 }
 
-impl WasmResult for i64 {
-    fn values(self, _: &mut ScanContext) -> WasmResultArray<ValRaw> {
-        smallvec![ValRaw::i64(self)]
-    }
-
-    fn types() -> WasmResultArray<ValType> {
-        smallvec![ValType::I64]
-    }
-}
-
-impl<const MIN: i64, const MAX: i64> WasmResult for RangedInteger<MIN, MAX> {
-    fn values(self, _: &mut ScanContext) -> WasmResultArray<ValRaw> {
-        smallvec![ValRaw::i64(self.value())]
-    }
-
-    fn types() -> WasmResultArray<ValType> {
-        smallvec![ValType::I64]
-    }
-}
+impl_wasm_result_for_int!(i8, i16, i32, i64, u8, u16, u32, u64);
 
 impl WasmResult for f32 {
     fn values(self, _: &mut ScanContext) -> WasmResultArray<ValRaw> {
@@ -839,12 +825,34 @@ pub(crate) unsafe fn free_engine() {
     {
         #[allow(static_mut_refs)]
         unsafe {
+            // The linker holds a reference to the engine, it must be
+            // dropped first, as `unload_process_handlers` requires the
+            // engine to be the only remaining reference.
+            LINKER.take();
             ENGINE.take().unwrap().unload_process_handlers()
         }
     }
 }
 
-pub(crate) fn new_linker() -> Linker<ScanContext<'static, 'static>> {
+/// Linker with the host functions exported to WASM code.
+///
+/// Building the linker requires registering every function exported to
+/// WASM code, which is expensive and produces the same result every time.
+/// For this reason, the linker is built only once and shared by every
+/// scanner. It needs to be mutable so that [`free_engine`] can destroy it.
+static mut LINKER: OnceLock<Linker<ScanContext<'static, 'static>>> =
+    OnceLock::new();
+
+/// Returns the global linker with the host functions exported to WASM code.
+pub(crate) fn get_linker<'a>() -> &'a Linker<ScanContext<'static, 'static>> {
+    unsafe {
+        // See the comment in `get_engine`.
+        #[allow(static_mut_refs)]
+        LINKER.get_or_init(new_linker)
+    }
+}
+
+fn new_linker() -> Linker<ScanContext<'static, 'static>> {
     let engine = get_engine();
     let mut linker = Linker::<ScanContext<'static, 'static>>::new(engine);
 
@@ -924,14 +932,15 @@ pub(crate) fn is_pat_match_at(
     pattern_id: PatternId,
     offset: i64,
 ) -> bool {
-    // Matches can't occur at negative offsets.
-    if offset < 0 {
+    // Matches can't occur at negative offsets or offsets larger than
+    // usize::MAX.
+    let Ok(offset) = usize::try_from(offset) else {
         return false;
-    }
+    };
     if let Some(matches) =
         caller.data().tracker.pattern_matches.get(pattern_id)
     {
-        matches.search(offset.try_into().unwrap()).is_ok()
+        matches.search(offset).is_ok()
     } else {
         false
     }
@@ -952,9 +961,7 @@ pub(crate) fn is_pat_match_in(
     if let Some(matches) =
         caller.data().tracker.pattern_matches.get(pattern_id)
     {
-        matches
-            .matches_in_range(lower_bound as isize..=upper_bound as isize)
-            .is_positive()
+        matches.matches_in_range(lower_bound..=upper_bound).is_positive()
     } else {
         false
     }
@@ -978,9 +985,20 @@ pub(crate) fn pat_range_match(
     let range: RangeInclusive<usize> =
         pattern_id_start.into()..=pattern_id_end.into();
 
-    let required = required.try_into().unwrap();
+    // Negative values, which are possible only when the quantifier is computed
+    // at runtime (e.g: `int8(0) of ($a, $b)`), can't be satisfied. The same
+    // applies to unsigned quantifiers greater than i64::MAX, which are received
+    // here as negative numbers, and to values that don't fit in `usize`.
+    let Ok(required) = usize::try_from(required) else {
+        return false;
+    };
 
     let ctx = caller.data();
+
+    if ctx.tracker.pattern_matches.is_empty() {
+        return required == 0;
+    }
+
     let mut num_matches = 0;
 
     for pattern_id in range {
@@ -1028,7 +1046,7 @@ pub(crate) fn pat_matches_in(
     if let Some(matches) =
         caller.data().tracker.pattern_matches.get(pattern_id)
     {
-        matches.matches_in_range(lower_bound as isize..=upper_bound as isize)
+        matches.matches_in_range(lower_bound..=upper_bound)
     } else {
         0
     }
@@ -1186,12 +1204,12 @@ fn lookup_field(
 
         final_field = Some(field);
 
-        if let TypeValue::Struct(s) = &field.type_value {
+        if let TypeValue::Struct(s) = field.type_value() {
             structure = s
         }
     }
 
-    final_field.unwrap().type_value.clone()
+    final_field.unwrap().type_value().clone()
 }
 
 /// Lookup a field of string type and returns its value.
@@ -1235,27 +1253,21 @@ pub(crate) fn lookup_object(
 }
 
 macro_rules! gen_lookup_fn {
-    ($name:ident, $return_type:ty, $type:path) => {
+    ($name:ident, $return_type:ty, $extract_fn:ident) => {
         #[wasm_export(sync = "before")]
         pub(crate) fn $name(
             caller: &mut Caller<'_, ScanContext>,
             structure: Option<Rc<Struct>>,
             num_lookup_indexes: i32,
         ) -> Option<$return_type> {
-            if let $type { value, .. } =
-                lookup_field(caller, structure, num_lookup_indexes)
-            {
-                value.extract().cloned()
-            } else {
-                None
-            }
+            lookup_field(caller, structure, num_lookup_indexes).$extract_fn()
         }
     };
 }
 
-gen_lookup_fn!(lookup_integer, i64, TypeValue::Integer);
-gen_lookup_fn!(lookup_float, f64, TypeValue::Float);
-gen_lookup_fn!(lookup_bool, bool, TypeValue::Bool);
+gen_lookup_fn!(lookup_integer, i64, try_as_integer);
+gen_lookup_fn!(lookup_float, f64, try_as_float);
+gen_lookup_fn!(lookup_bool, bool, try_as_bool);
 
 macro_rules! gen_array_indexing_fn {
     ($name:ident, $fn:ident, $return_type:ty) => {
@@ -1265,7 +1277,8 @@ macro_rules! gen_array_indexing_fn {
             array: Rc<Array>,
             index: i64,
         ) -> Option<$return_type> {
-            array.$fn().get(index as usize).map(|value| *value)
+            let index = usize::try_from(index).ok()?;
+            array.$fn().get(index).copied()
         }
     };
 }
@@ -1281,9 +1294,10 @@ pub(crate) fn array_indexing_string(
     array: Rc<Array>,
     index: i64,
 ) -> Option<Rc<BString>> {
+    let index = usize::try_from(index).ok()?;
     array
         .as_string_array()
-        .get(index as usize)
+        .get(index)
         .cloned()
 }
 
@@ -1294,9 +1308,10 @@ pub(crate) fn array_indexing_struct(
     array: Rc<Array>,
     index: i64,
 ) -> Option<Rc<Struct>> {
+    let index = usize::try_from(index).ok()?;
     array
         .as_struct_array()
-        .get(index as usize)
+        .get(index)
         .cloned()
 }
 
@@ -1616,6 +1631,32 @@ gen_str_op_fn!(str_istartswith, starts_with, true);
 gen_str_op_fn!(str_iendswith, ends_with, true);
 gen_str_op_fn!(str_iequals, equals, true);
 
+macro_rules! gen_str_op_many_fn {
+    ($name:ident, $op:tt, $case_insensitive:literal) => {
+        #[wasm_export(sync = "none")]
+        pub(crate) fn $name(
+            caller: &mut Caller<'_, ScanContext>,
+            lhs: RuntimeString,
+            literal_set: i32,
+        ) -> bool {
+            lhs.$op(
+                crate::compiler::LiteralSetId::from(literal_set),
+                caller.data(),
+                $case_insensitive,
+            )
+        }
+    };
+}
+
+gen_str_op_many_fn!(str_eq_many, equals_many, false);
+gen_str_op_many_fn!(str_iequals_many, equals_many, true);
+gen_str_op_many_fn!(str_contains_many, contains_many, false);
+gen_str_op_many_fn!(str_icontains_many, contains_many, true);
+gen_str_op_many_fn!(str_startswith_many, starts_with_many, false);
+gen_str_op_many_fn!(str_istartswith_many, starts_with_many, true);
+gen_str_op_many_fn!(str_endswith_many, ends_with_many, false);
+gen_str_op_many_fn!(str_iendswith_many, ends_with_many, true);
+
 #[wasm_export(sync = "none")]
 pub(crate) fn str_len(
     caller: &mut Caller<'_, ScanContext>,
@@ -1648,38 +1689,44 @@ pub(crate) fn str_matches_regex_set(
 }
 
 macro_rules! gen_int_fn {
-    ($name:ident, $return_type:ty, $from_fn:ident, $min:expr, $max:expr) => {
+    ($name:ident, $return_type:ty, $from_fn:ident) => {
         #[wasm_export(public = true, sync = "none")]
         pub(crate) fn $name(
             caller: &mut Caller<'_, ScanContext>,
             offset: i64,
-        ) -> Option<RangedInteger<$min, $max>> {
+        ) -> Option<$return_type> {
             let offset = usize::try_from(offset).ok()?;
             caller
                 .data()
                 .scanned_data()?
-                .get(offset..offset + mem::size_of::<$return_type>())
+                .get(
+                    offset
+                        ..offset.checked_add(mem::size_of::<$return_type>())?,
+                )
                 .map(|bytes| {
-                    <$return_type>::$from_fn(bytes.try_into().unwrap()) as i64
+                    <$return_type>::$from_fn(bytes.try_into().unwrap())
                 })
-                .map(|i| RangedInteger::<$min, $max>::new(i))
         }
     };
 }
 
-gen_int_fn!(uint8, u8, from_le_bytes, 0, 255);
-gen_int_fn!(uint16, u16, from_le_bytes, 0, 65_535);
-gen_int_fn!(uint32, u32, from_le_bytes, 0, 4_294_967_295);
-gen_int_fn!(uint8be, u8, from_be_bytes, 0, 255);
-gen_int_fn!(uint16be, u16, from_be_bytes, 0, 65_535);
-gen_int_fn!(uint32be, u32, from_be_bytes, 0, 4_294_967_295);
+gen_int_fn!(uint8, u8, from_le_bytes);
+gen_int_fn!(uint16, u16, from_le_bytes);
+gen_int_fn!(uint32, u32, from_le_bytes);
+gen_int_fn!(uint64, u64, from_le_bytes);
+gen_int_fn!(uint8be, u8, from_be_bytes);
+gen_int_fn!(uint16be, u16, from_be_bytes);
+gen_int_fn!(uint32be, u32, from_be_bytes);
+gen_int_fn!(uint64be, u64, from_be_bytes);
 
-gen_int_fn!(int8, i8, from_le_bytes, -128, 127);
-gen_int_fn!(int16, i16, from_le_bytes, -32_768, 32_767);
-gen_int_fn!(int32, i32, from_le_bytes, -2_147_483_648, 2_147_483_647);
-gen_int_fn!(int8be, i8, from_be_bytes, -128, 127);
-gen_int_fn!(int16be, i16, from_be_bytes, -32_768, 32_767);
-gen_int_fn!(int32be, i32, from_be_bytes, -2_147_483_648, 2_147_483_647);
+gen_int_fn!(int8, i8, from_le_bytes);
+gen_int_fn!(int16, i16, from_le_bytes);
+gen_int_fn!(int32, i32, from_le_bytes);
+gen_int_fn!(int64, i64, from_le_bytes);
+gen_int_fn!(int8be, i8, from_be_bytes);
+gen_int_fn!(int16be, i16, from_be_bytes);
+gen_int_fn!(int32be, i32, from_be_bytes);
+gen_int_fn!(int64be, i64, from_be_bytes);
 
 macro_rules! gen_float_fn {
     ($name:ident, $return_type:ty, $from_fn:ident) => {
@@ -1692,7 +1739,10 @@ macro_rules! gen_float_fn {
             caller
                 .data()
                 .scanned_data()?
-                .get(offset..offset + mem::size_of::<$return_type>())
+                .get(
+                    offset
+                        ..offset.checked_add(mem::size_of::<$return_type>())?,
+                )
                 .map(|bytes| {
                     <$return_type>::$from_fn(bytes.try_into().unwrap()) as f64
                 })

@@ -66,6 +66,76 @@ fn filter_by_tag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("foo src/tests/testdata/dummy.file"));
+
+    let temp_dir = TempDir::new().unwrap();
+    let rules_file = temp_dir.child("rules.yar");
+    rules_file
+        .write_str(
+            r#"
+            rule rule_a : tag_a { condition: true }
+            rule rule_b : tag_b { condition: true }
+            "#,
+        )
+        .unwrap();
+
+    // NDJSON: only rule_a should be returned when filtering by tag_a.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=ndjson")
+        .arg("--tag=tag_a")
+        .arg(rules_file.path())
+        .arg("src/tests/testdata/dummy.file")
+        .assert()
+        .success()
+        .stdout("{\"path\":\"src/tests/testdata/dummy.file\",\"rules\":[{\"identifier\":\"rule_a\"}]}\n");
+
+    // NDJSON: nothing should be returned when filtering by a non-matching tag.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=ndjson")
+        .arg("--tag=tag_c")
+        .arg(rules_file.path())
+        .arg("src/tests/testdata/dummy.file")
+        .assert()
+        .success()
+        .stdout("");
+
+    // JSON: only rule_a should be in `matches` when filtering by tag_a.
+    let output = Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=json")
+        .arg("--tag=tag_a")
+        .arg(rules_file.path())
+        .arg("src/tests/testdata/dummy.file")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output).expect("valid JSON output");
+    let matches = json["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["rule"], "rule_a");
+
+    // JSON: `matches` should be empty when filtering by a non-matching tag.
+    let output = Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=json")
+        .arg("--tag=tag_c")
+        .arg(rules_file.path())
+        .arg("src/tests/testdata/dummy.file")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output).expect("valid JSON output");
+    let matches = json["matches"].as_array().unwrap();
+    assert!(matches.is_empty());
 }
 
 #[test]
@@ -272,6 +342,32 @@ warning[unsupported_module]: module `unknown` is not supported
   |
 5 |      unknown.foo()
   |      ------- module `unknown` used here
+  |
+  = note: the whole rule `test` will be ignored
+"#,
+        );
+}
+
+#[test]
+fn ignore_supported_module() {
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--ignore-module=math")
+        .arg("src/tests/testdata/known_module.yar")
+        .arg("src/tests/testdata/dummy.file")
+        .assert()
+        .success()
+        .stderr(
+            r#"warning[unsupported_module]: module `math` is not supported
+ --> src/tests/testdata/known_module.yar:1:1
+  |
+1 | import "math"
+  | ------------- module `math` used here
+warning[unsupported_module]: module `math` is not supported
+ --> src/tests/testdata/known_module.yar:5:6
+  |
+5 |      math.entropy(0, filesize) >= 0
+  |      ---- module `math` used here
   |
   = note: the whole rule `test` will be ignored
 "#,
@@ -570,4 +666,204 @@ fn ignore_invalid_rules() {
         .assert()
         .success()
         .stdout(predicate::str::contains("valid_rule"));
+}
+
+#[test]
+fn format_ndjson_omits_non_matching_files() {
+    let temp_dir = TempDir::new().unwrap();
+    let matching_file = temp_dir.child("matching.file");
+    let non_matching_file = temp_dir.child("non_matching.file");
+
+    matching_file.write_str("foo").unwrap();
+    non_matching_file.write_str("bar").unwrap();
+
+    let expected_path = matching_file.path().to_str().unwrap();
+
+    // Non-matching files should not appear in ndjson output.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=ndjson")
+        .arg("src/tests/testdata/foo.yar")
+        .arg(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(format!(
+            "{{\"path\":{},\"rules\":[{{\"identifier\":\"foo\"}}]}}\n",
+            serde_json::to_string(expected_path).unwrap()
+        ));
+
+    // When --tag filters out all matching rules, nothing should be emitted.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=ndjson")
+        .arg("--tag=non_existent_tag")
+        .arg("src/tests/testdata/foo.yar")
+        .arg(temp_dir.path())
+        .assert()
+        .success()
+        .stdout("");
+
+    // With --count, only files with count > 0 should be emitted.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=ndjson")
+        .arg("--count")
+        .arg("src/tests/testdata/foo.yar")
+        .arg(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(format!(
+            "{{\"path\":{},\"count\":1}}\n",
+            serde_json::to_string(expected_path).unwrap()
+        ));
+
+    // With --count and --tag filtering out matches, nothing should be emitted.
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--output-format=ndjson")
+        .arg("--count")
+        .arg("--tag=non_existent_tag")
+        .arg("src/tests/testdata/foo.yar")
+        .arg(temp_dir.path())
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn count_omits_non_matching_files() {
+    let temp_dir = TempDir::new().unwrap();
+    let matching_file = temp_dir.child("matching.file");
+    let non_matching_file = temp_dir.child("non_matching.file");
+
+    matching_file.write_str("foo").unwrap();
+    non_matching_file.write_str("bar").unwrap();
+
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--count")
+        .arg("src/tests/testdata/foo.yar")
+        .arg(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(format!("{}: 1\n", matching_file.path().display()));
+
+    Command::new(cargo_bin!("yr"))
+        .arg("scan")
+        .arg("--count")
+        .arg("--tag=non_existent_tag")
+        .arg("src/tests/testdata/foo.yar")
+        .arg(temp_dir.path())
+        .assert()
+        .success()
+        .stdout("");
+}
+
+// Regression test for https://github.com/VirusTotal/yara-x/issues/785.
+//
+// When `yr scan` runs in an interactive terminal (both `stdout` and `stderr`
+// are TTYs), `ParWalker` uses an `indicatif::ProgressBar` to display the scan
+// progress. Previously, output lines were printed via `MultiProgress::println`,
+// which pads lines with spaces up to the terminal width instead of writing `\n`
+// characters.
+//
+// Standard `Command` tests pipe `stdout` and `stderr`, so `is_tty()` is `false`
+// and the progress bar code path is not exercised. To test the interactive
+// terminal behavior, we allocate a pseudo-terminal (PTY) pair via `openpty` and
+// attach the child process's `stdin`, `stdout`, and `stderr` to the `slave` end
+// of the PTY while reading the combined terminal stream from the `master` end.
+#[cfg(unix)]
+#[test]
+fn issue_785() {
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+    use std::ptr;
+
+    #[repr(C)]
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+
+    unsafe extern "C" {
+        fn openpty(
+            amaster: *mut std::ffi::c_int,
+            aslave: *mut std::ffi::c_int,
+            name: *mut std::ffi::c_char,
+            termp: *const std::ffi::c_void,
+            winp: *const Winsize,
+        ) -> std::ffi::c_int;
+    }
+
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+
+    // Set a non-zero terminal window size (80x24) so `indicatif` / `console`
+    // detects valid terminal dimensions when querying `TIOCGWINSZ`.
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+
+    let ret = unsafe {
+        openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            ptr::null_mut(),
+            ptr::null(),
+            &ws,
+        )
+    };
+    assert_eq!(ret, 0);
+
+    let mut master = unsafe { File::from_raw_fd(master_fd) };
+    let slave = unsafe { File::from_raw_fd(slave_fd) };
+
+    let mut cmd = std::process::Command::new(cargo_bin!("yr"));
+
+    cmd.arg("scan")
+        .arg("--print-strings")
+        .arg("src/tests/testdata/foo.yar")
+        .arg("src/tests/testdata/dummy.file")
+        // `TERM` must be set to a value other than `"dumb"` because `indicatif`
+        // checks `console::is_dumb()`, which on Unix returns `true` if `TERM` is
+        // unset or `"dumb"` (as is common in CI environments). When `is_dumb()` is
+        // `true`, `indicatif` falls back to a hidden draw target and bypasses its
+        // terminal rendering logic.
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+
+    let mut child = cmd.spawn().unwrap();
+
+    // `cmd` holds the `Stdio` file descriptors duplicated from `slave`. Drop
+    // `cmd` immediately after spawning so no `slave` file descriptors remain
+    // open in the parent process; otherwise, reading from `master` below would
+    // block forever after the child exits.
+    drop(cmd);
+
+    // Read all output produced by the child from the PTY master until the
+    // slave side is closed. Once the child exits and all slave descriptors are
+    // closed, `read` returns `Ok(0)` on macOS/BSD or `Err(EIO)` on Linux.
+    let mut output = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match master.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => output.extend_from_slice(&buf[..n]),
+        }
+    }
+
+    assert!(child.wait().unwrap().success());
+
+    // The PTY line discipline translates `\n` into `\r\n` (`ONLCR`). Verify
+    // that each output line is terminated by `\r\n` rather than padded with
+    // spaces to the 80-column terminal width.
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.contains("0x0:3:$foo: foo\r\n0x0:3:$foo_hex: 66 6f 6f\r\n"),
+        "unexpected terminal output: {output:?}"
+    );
 }

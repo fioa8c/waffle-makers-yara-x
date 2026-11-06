@@ -122,6 +122,9 @@ typedef struct YRX_MATCH {
   size_t offset;
   // Length of the match.
   size_t length;
+  // XOR key used for decrypting the data if the pattern had the `xor`
+  // modifier, or -1 if otherwise.
+  int16_t xor_key;
 } YRX_MATCH;
 
 // Callback function passed to [`yrx_pattern_iter_matches`].
@@ -345,7 +348,7 @@ enum YRX_RESULT yrx_compiler_add_source_with_origin(struct YRX_COMPILER *compile
 enum YRX_RESULT yrx_compiler_add_include_dir(struct YRX_COMPILER *compiler,
                                              const char *dir);
 
-// Tell the compiler that a YARA module is not supported.
+// Tell the compiler that a YARA module should be ignored.
 //
 // Import statements for ignored modules will be ignored without errors but a
 // warning will be issued. Any rule that make use of an ignored module will be

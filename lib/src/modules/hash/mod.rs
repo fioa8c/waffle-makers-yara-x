@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::convert::TryInto;
 
 use md5::Md5;
 use rustc_hash::FxHashMap;
@@ -40,6 +39,18 @@ fn main(_ctx: &mut ModuleContext, _data: &[u8]) -> Result<Hash, ModuleError> {
     Ok(Hash::new())
 }
 
+#[inline]
+fn data_slice<'a>(
+    ctx: &'a ScanContext,
+    offset: i64,
+    size: i64,
+) -> Option<&'a [u8]> {
+    let start = usize::try_from(offset).ok()?;
+    let len = usize::try_from(size).ok()?;
+    let end = start.checked_add(len)?;
+    ctx.scanned_data()?.get(start..end)
+}
+
 /// Calculates the MD5 hash of a portion of the scanned data.
 #[module_export(name = "md5")]
 fn md5_data(
@@ -58,13 +69,12 @@ fn md5_data(
         return cached;
     }
 
-    let range = offset.try_into().ok()?..(offset + size).try_into().ok()?;
-    let data = ctx.scanned_data()?.get(range)?;
+    let data = data_slice(ctx, offset, size)?;
     let mut hasher = Md5::new();
 
     hasher.update(data);
 
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
 
     MD5_CACHE.with(|cache| {
         cache.borrow_mut().insert((offset, size), digest.clone());
@@ -82,9 +92,8 @@ fn md5_str(
     let mut hasher = Md5::new();
     hasher.update(s.as_bstr(ctx));
 
-    Some(Lowercase::<FixedLenString<32>>::new(format!(
-        "{:x}",
-        hasher.finalize()
+    Some(Lowercase::<FixedLenString<32>>::new(hex::encode(
+        hasher.finalize(),
     )))
 }
 
@@ -106,13 +115,12 @@ fn sha1_data(
         return cached;
     }
 
-    let range = offset.try_into().ok()?..(offset + size).try_into().ok()?;
-    let data = ctx.scanned_data()?.get(range)?;
+    let data = data_slice(ctx, offset, size)?;
     let mut hasher = Sha1::new();
 
     hasher.update(data);
 
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
 
     SHA1_CACHE.with(|cache| {
         cache.borrow_mut().insert((offset, size), digest.clone());
@@ -130,9 +138,8 @@ fn sha1_str(
     let mut hasher = Sha1::new();
     hasher.update(s.as_bstr(ctx));
 
-    Some(Lowercase::<FixedLenString<40>>::new(format!(
-        "{:x}",
-        hasher.finalize()
+    Some(Lowercase::<FixedLenString<40>>::new(hex::encode(
+        hasher.finalize(),
     )))
 }
 
@@ -154,13 +161,12 @@ fn sha256_data(
         return cached;
     }
 
-    let range = offset.try_into().ok()?..(offset + size).try_into().ok()?;
-    let data = ctx.scanned_data()?.get(range)?;
+    let data = data_slice(ctx, offset, size)?;
     let mut hasher = Sha256::new();
 
     hasher.update(data);
 
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
 
     SHA256_CACHE.with(|cache| {
         cache.borrow_mut().insert((offset, size), digest.clone());
@@ -178,9 +184,8 @@ fn sha256_str(
     let mut hasher = Sha256::new();
     hasher.update(s.as_bstr(ctx));
 
-    Some(Lowercase::<FixedLenString<64>>::new(format!(
-        "{:x}",
-        hasher.finalize()
+    Some(Lowercase::<FixedLenString<64>>::new(hex::encode(
+        hasher.finalize(),
     )))
 }
 
@@ -195,8 +200,7 @@ fn crc_data(ctx: &ScanContext, offset: i64, size: i64) -> Option<i64> {
         return cached;
     }
 
-    let range = offset.try_into().ok()?..(offset + size).try_into().ok()?;
-    let data = ctx.scanned_data()?.get(range)?;
+    let data = data_slice(ctx, offset, size)?;
     let crc = crc32fast::hash(data);
 
     CRC32_CACHE.with(|cache| {
@@ -245,8 +249,7 @@ fn checksum_data(ctx: &ScanContext, offset: i64, size: i64) -> Option<i64> {
         return cached;
     }
 
-    let range = offset.try_into().ok()?..(offset + size).try_into().ok()?;
-    let data = ctx.scanned_data()?.get(range)?;
+    let data = data_slice(ctx, offset, size)?;
     let checksum = checksum32(data);
 
     CHECKSUM32_CACHE.with(|cache| {

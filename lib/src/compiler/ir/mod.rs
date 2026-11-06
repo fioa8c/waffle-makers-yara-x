@@ -35,8 +35,7 @@ use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::mem;
 use std::mem::discriminant;
-use std::ops::RangeInclusive;
-use std::ops::{Add, Index};
+use std::ops::{Index, RangeInclusive};
 use std::rc::Rc;
 
 use bitflags::bitflags;
@@ -47,16 +46,19 @@ use serde::{Deserialize, Serialize};
 use yara_x_parser::Span;
 use yara_x_parser::ast::Ident;
 
-use crate::compiler::context::{Var, VarStack};
+use crate::compiler::context::Var;
 use crate::compiler::ir::dfs::{
     DFSIter, DFSWithScopeIter, Event, EventContext, dfs_common,
 };
 
-use crate::compiler::{FilesizeBounds, HeaderConstraint, RegexSetId};
+use crate::compiler::{
+    FilesizeBounds, HeaderConstraint, LiteralSetId, RegexSetId, RuleId,
+};
 use crate::re;
 use crate::symbols::Symbol;
 use crate::types::Value::Const;
 use crate::types::{FuncSignature, Type, TypeValue};
+use crate::utils::cast;
 
 pub(in crate::compiler) use ast2ir::patterns_from_ast;
 pub(in crate::compiler) use ast2ir::rule_condition_from_ast;
@@ -105,12 +107,13 @@ bitflags! {
 /// within the confines of a specific rule. If two distinct rules declare
 /// precisely the same pattern, including any modifiers, they will reference
 /// the same [`Pattern`] instance.
+use std::num::NonZeroU32;
+
 pub(crate) struct PatternInRule<'src> {
     identifier: Ident<'src>,
     pattern: Pattern,
     span: Span,
     in_use: bool,
-    fast_scan_allowed: bool,
 }
 
 impl<'src> PatternInRule<'src> {
@@ -188,24 +191,36 @@ impl<'src> PatternInRule<'src> {
         self
     }
 
-    /// Returns true if this pattern can be fast-scanned.
-    ///
-    /// A pattern can be fast-scanned if its occurrences are only evaluated
-    /// as simple boolean checks (e.g. `$a`), meaning the scanner can stop
-    /// tracking matches for it once the first match has been found.
+    /// Returns the maximum number of matches required for this pattern in
+    /// fast-scan mode, or `None` if all matches must be tracked.
     #[inline]
-    pub fn fast_scan_allowed(&self) -> bool {
-        self.fast_scan_allowed
+    pub fn max_matches_in_fast_scan(&self) -> Option<NonZeroU32> {
+        self.pattern.max_matches_in_fast_scan()
+    }
+
+    /// Updates the maximum number of matches required for this pattern in
+    /// fast-scan mode.
+    ///
+    /// If both the current limit and `limit` are `Some`, the higher of the
+    /// two limits is kept. If either is `None`, fast-scanning is disallowed
+    /// (`None`).
+    #[inline]
+    pub fn update_max_matches_in_fast_scan(
+        &mut self,
+        limit: Option<NonZeroU32>,
+    ) -> &mut Self {
+        self.pattern.update_max_matches_in_fast_scan(limit);
+        self
     }
 
     /// Disallows fast-scanning for this pattern.
     ///
     /// This is called when the pattern is used in a context that requires
-    /// tracking all matches (such as count `#a`, offset `@a`, length `!a`,
-    /// anchored checks, or loop equivalents).
+    /// tracking all matches (such as offset `@a`, length `!a`, range-bounded
+    /// count `#a in (..)`, anchored checks, or non-constant count comparisons).
     #[inline]
     pub fn disallow_fast_scan(&mut self) -> &mut Self {
-        self.fast_scan_allowed = false;
+        self.pattern.disallow_fast_scan();
         self
     }
 }
@@ -347,6 +362,43 @@ impl Pattern {
             Pattern::Hex(regexp) => &regexp.header_constraints,
         }
     }
+
+    #[inline]
+    pub fn max_matches_in_fast_scan(&self) -> Option<NonZeroU32> {
+        match self {
+            Pattern::Text(literal) => literal.max_matches_in_fast_scan,
+            Pattern::Regexp(regexp) | Pattern::Hex(regexp) => {
+                regexp.max_matches_in_fast_scan
+            }
+        }
+    }
+
+    #[inline]
+    pub fn update_max_matches_in_fast_scan(
+        &mut self,
+        limit: Option<NonZeroU32>,
+    ) {
+        let current = match self {
+            Pattern::Text(literal) => &mut literal.max_matches_in_fast_scan,
+            Pattern::Regexp(regexp) | Pattern::Hex(regexp) => {
+                &mut regexp.max_matches_in_fast_scan
+            }
+        };
+        *current = match (*current, limit) {
+            (Some(curr), Some(new)) => Some(curr.max(new)),
+            _ => None,
+        };
+    }
+
+    #[inline]
+    pub fn disallow_fast_scan(&mut self) {
+        match self {
+            Pattern::Text(literal) => literal.max_matches_in_fast_scan = None,
+            Pattern::Regexp(regexp) | Pattern::Hex(regexp) => {
+                regexp.max_matches_in_fast_scan = None
+            }
+        }
+    }
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -359,6 +411,7 @@ pub(crate) struct LiteralPattern {
     pub base64wide_alphabet: Option<String>,
     pub filesize_bounds: FilesizeBounds,
     pub header_constraints: HeaderConstraint,
+    pub max_matches_in_fast_scan: Option<NonZeroU32>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -368,6 +421,7 @@ pub(crate) struct RegexpPattern {
     pub anchored_at: Option<usize>,
     pub filesize_bounds: FilesizeBounds,
     pub header_constraints: HeaderConstraint,
+    pub max_matches_in_fast_scan: Option<NonZeroU32>,
 }
 
 /// The index of a pattern in the rule that declares it.
@@ -506,6 +560,117 @@ impl IR {
         self.parents[expr_id.0 as usize] = parent_id;
     }
 
+    /// Given an expression that counts the occurrences of a pattern (`#a` or
+    /// `#` inside a `for .. of` loop), determines how many matches the scanner
+    /// actually needs to find in fast-scan mode.
+    ///
+    /// When `#a` is compared against a constant, we don't need to keep finding
+    /// matches forever, once a certain number of matches is reached, finding
+    /// additional matches won't change the outcome of the comparison:
+    ///
+    /// - For `#a < 1000` (or `#a >= 1000`), we can stop after 1000 matches.
+    ///   Once 1000 matches are found, `#a < 1000` is already `false` (and
+    ///   `#a >= 1000` is already `true`), and finding more matches won't
+    ///   change that.
+    ///
+    /// - For `#a > 1000` (or `#a <= 1000`), we must find up to 1001 matches.
+    ///   If we stopped at 1000, `#a` would remain at 1000 and `1000 > 1000`
+    ///   would evaluate to `false` even when the file has more than 1000
+    ///   matches. Finding one extra match (1001) is enough to make `#a > 1000`
+    ///   evaluate to `true`.
+    ///
+    /// - For `#a == 1000` (or `#a != 1000`), we also need 1001 matches so
+    ///   we can tell the difference between "exactly 1000 matches" and "more
+    ///   than 1000 matches".
+    ///
+    /// - When `#a` is used directly as a boolean (e.g., `condition: #a` or
+    ///   `#a and $b`), we only need **1** match to know that `#a` is non-zero.
+    ///
+    /// - If `#a` is used in any other way (such as `#a == #b` or `#a + 1 > 10`),
+    ///   this function returns `None`, indicating that the scanner cannot stop
+    ///   early and must track all matches.
+    pub(crate) fn required_matches_for_count(
+        &self,
+        count_expr_id: ExprId,
+    ) -> Option<NonZeroU32> {
+        let Some(parent_id) = self.get_parent(count_expr_id) else {
+            // Root condition is `#a` (evaluated as boolean `#a != 0`).
+            return NonZeroU32::new(1);
+        };
+
+        let limit_i64 = match self.get(parent_id) {
+            // Boolean contexts where `#a` is evaluated as `#a != 0`.
+            Expr::And { .. } | Expr::Or { .. } | Expr::Not { .. } => Some(1),
+            Expr::ForOf(for_of) if for_of.body == count_expr_id => Some(1),
+            Expr::ForIn(for_in) if for_in.body == count_expr_id => Some(1),
+            Expr::With(with) if with.body == count_expr_id => Some(1),
+            Expr::OfExprTuple(of) if of.items.contains(&count_expr_id) => {
+                Some(1)
+            }
+
+            // #a == K, K == #a, #a != K, K != #a -> K + 1 (to distinguish
+            // count == K from count > K).
+            Expr::Eq { lhs, rhs } | Expr::Ne { lhs, rhs } => {
+                let other = if *lhs == count_expr_id { *rhs } else { *lhs };
+                self.get(other)
+                    .try_as_const_integer()
+                    .map(|k| k.saturating_add(1))
+            }
+
+            // #a > K -> K + 1; K > #a (i.e. #a < K) -> K.
+            Expr::Gt { lhs, rhs } => {
+                if *lhs == count_expr_id {
+                    self.get(*rhs)
+                        .try_as_const_integer()
+                        .map(|k| k.saturating_add(1))
+                } else {
+                    self.get(*lhs).try_as_const_integer()
+                }
+            }
+
+            // #a >= K -> K; K >= #a (i.e. #a <= K) -> K + 1.
+            Expr::Ge { lhs, rhs } => {
+                if *lhs == count_expr_id {
+                    self.get(*rhs).try_as_const_integer()
+                } else {
+                    self.get(*lhs)
+                        .try_as_const_integer()
+                        .map(|k| k.saturating_add(1))
+                }
+            }
+
+            // #a < K -> K; K < #a (i.e. #a > K) -> K + 1.
+            Expr::Lt { lhs, rhs } => {
+                if *lhs == count_expr_id {
+                    self.get(*rhs).try_as_const_integer()
+                } else {
+                    self.get(*lhs)
+                        .try_as_const_integer()
+                        .map(|k| k.saturating_add(1))
+                }
+            }
+
+            // #a <= K -> K + 1; K <= #a (i.e. #a >= K) -> K.
+            Expr::Le { lhs, rhs } => {
+                if *lhs == count_expr_id {
+                    self.get(*rhs)
+                        .try_as_const_integer()
+                        .map(|k| k.saturating_add(1))
+                } else {
+                    self.get(*lhs).try_as_const_integer()
+                }
+            }
+
+            // Any other parent expression (arithmetic, non-constant comparison,
+            // function argument, etc.) requires tracking all matches.
+            _ => None,
+        }?;
+
+        // Clamp constants <= 0 (e.g. `#a >= 0` or `#a > -5`) to a minimum limit
+        // of 1, and return `None` if the limit exceeds `u32::MAX`.
+        u32::try_from(limit_i64.max(1)).ok().and_then(NonZeroU32::new)
+    }
+
     /// Pushes an [`Expr`] into the IR tree.
     ///
     /// Returns the [`ExprId`] the identifies the pushed expression in the
@@ -549,6 +714,17 @@ impl IR {
             }
             Event::Leave(_) => {}
         });
+    }
+
+    /// Returns the maximum variable index referenced or declared in the
+    /// subtree rooted at `start`, or `None` if no variables are used.
+    fn max_var_index(&self, start: ExprId) -> Option<i32> {
+        self.dfs_iter(start)
+            .filter_map(|evt| match evt {
+                Event::Enter((_, expr, _)) => expr.max_var_index(),
+                Event::Leave(_) => None,
+            })
+            .max()
     }
 
     /// Returns an iterator that performs a depth first search starting at
@@ -752,7 +928,11 @@ impl IR {
             };
 
             let symbol = match self.get(current_expr_id) {
-                Expr::Symbol(symbol) => symbol,
+                Expr::Symbol(symbol)
+                | Expr::PatternMatchVar { symbol, .. }
+                | Expr::PatternCountVar { symbol, .. }
+                | Expr::PatternOffsetVar { symbol, .. }
+                | Expr::PatternLengthVar { symbol, .. } => symbol,
                 _ => continue,
             };
 
@@ -770,17 +950,20 @@ impl IR {
                     Expr::ForIn(for_in) => {
                         for_in.variables.iter().any(|v| v.index() == var)
                     }
+                    Expr::ForOf(for_of) => for_of.for_vars.item.index() == var,
                     _ => false,
                 }) {
                     Some(stmt) => stmt,
                     None => continue,
                 };
 
-            // Iterate the ancestors of the current statement up to the
+            // Iterate the current expression and its ancestors up to the
             // statement that declared the variable (not included), and mark
-            // them as dependent on that variable.
-            for ancestor in self
-                .ancestors(current_expr_id)
+            // them as dependent on that variable. Including `current_expr_id`
+            // itself is required for `Pattern*Var` nodes, which directly
+            // reference `for_of.for_vars.item` without a child `Expr::Symbol`.
+            for ancestor in std::iter::once(current_expr_id)
+                .chain(self.ancestors(current_expr_id))
                 .take_while(|ancestor| ancestor.ne(&stmt_declaring_var))
             {
                 match &mut depends_on[ancestor.0 as usize] {
@@ -859,12 +1042,12 @@ impl IR {
                             if let Some(inner_loop) = scopes.next() {
                                 result.push((current_expr_id, inner_loop));
                             }
-                            // Limit the number of candidates to a reasonable
-                            // number.
-                            if result.len() > 100 {
-                                return result;
-                            }
                         }
+                    }
+
+                    // Limit the number of candidates to a reasonable number.
+                    if result.len() > 100 {
+                        return result;
                     }
                 }
                 _ => {}
@@ -900,10 +1083,19 @@ impl IR {
         for (expr_id, loop_expr_id) in self.find_hoisting_candidates() {
             let loop_parent = self.get_parent(loop_expr_id);
 
-            let var_index = self
-                .ancestors(loop_expr_id)
-                .map(|expr_id| self.get(expr_id).stack_frame_size())
-                .sum::<i32>();
+            let var_index =
+                cast!(self.get(loop_expr_id), Expr::ForIn).for_vars.n.index();
+
+            if var_index >= crate::wasm::MAX_VARS {
+                continue;
+            }
+
+            if let Some(max_idx) = self.max_var_index(loop_expr_id)
+                && max_idx >= var_index
+                && max_idx + 1 >= crate::wasm::MAX_VARS
+            {
+                continue;
+            }
 
             // Shift all variables with an index greater or equal than
             // var_index one position to the right in order to make room for
@@ -952,14 +1144,18 @@ impl IR {
         c: &TypeValue,
         inclusive: bool,
     ) -> Option<Bound<i64>> {
+        // Integer constants, either signed or unsigned. Unsigned constants
+        // that don't fit in an `i64` are ignored.
+        if let Some(v) =
+            c.try_as_const_i128().and_then(|v| i64::try_from(v).ok())
+        {
+            return if inclusive {
+                Some(Bound::Included(v))
+            } else {
+                Some(Bound::Excluded(v))
+            };
+        }
         match c {
-            TypeValue::Integer { value: Const(v), .. } => {
-                if inclusive {
-                    Some(Bound::Included(*v))
-                } else {
-                    Some(Bound::Excluded(*v))
-                }
-            }
             TypeValue::Float { value: Const(v), .. } if v.is_finite() => {
                 let floor = v.floor();
                 if inclusive && floor == *v {
@@ -976,14 +1172,18 @@ impl IR {
         c: &TypeValue,
         inclusive: bool,
     ) -> Option<Bound<i64>> {
+        // Integer constants, either signed or unsigned. Unsigned constants
+        // that don't fit in an `i64` are ignored.
+        if let Some(v) =
+            c.try_as_const_i128().and_then(|v| i64::try_from(v).ok())
+        {
+            return if inclusive {
+                Some(Bound::Included(v))
+            } else {
+                Some(Bound::Excluded(v))
+            };
+        }
         match c {
-            TypeValue::Integer { value: Const(v), .. } => {
-                if inclusive {
-                    Some(Bound::Included(*v))
-                } else {
-                    Some(Bound::Excluded(*v))
-                }
-            }
             TypeValue::Float { value: Const(v), .. } if v.is_finite() => {
                 let ceil = v.ceil();
                 if inclusive && ceil == *v {
@@ -1008,7 +1208,10 @@ impl IR {
     /// In contrast, the condition `filesize < 10MB or $a` does not impose a
     /// filesize constraint, since the use of `or` allows files larger than
     /// 10MB to also match.
-    pub fn filesize_bounds(&self) -> FilesizeBounds {
+    pub fn filesize_bounds<'a>(
+        &self,
+        rule_lookup: impl Fn(RuleId) -> Option<&'a FilesizeBounds>,
+    ) -> FilesizeBounds {
         let mut result = FilesizeBounds::default();
         let mut dfs = self.dfs_iter(self.root.unwrap());
 
@@ -1018,6 +1221,13 @@ impl IR {
                 _ => continue,
             };
             match expr {
+                Expr::Symbol(symbol) => {
+                    if let Symbol::Rule { rule_id, .. } = symbol.as_ref()
+                        && let Some(rule_bounds) = rule_lookup(*rule_id)
+                    {
+                        result.merge(rule_bounds);
+                    }
+                }
                 Expr::Gt { lhs, rhs } => {
                     match (self.get(*lhs), self.get(*rhs)) {
                         // constant > filesize
@@ -1128,6 +1338,7 @@ impl IR {
     pub fn header_constraints<'a>(
         &self,
         pattern_lookup: impl Fn(PatternIdx) -> &'a Pattern,
+        rule_lookup: impl Fn(RuleId) -> Option<&'a HeaderConstraint>,
     ) -> HeaderConstraint {
         let mut constrained_bytes = BTreeMap::new();
         let mut unsatisfiable = false;
@@ -1139,6 +1350,33 @@ impl IR {
                 _ => continue,
             };
             match expr {
+                Expr::Symbol(symbol) => {
+                    if let Symbol::Rule { rule_id, .. } = symbol.as_ref()
+                        && let Some(rule_constraints) = rule_lookup(*rule_id)
+                    {
+                        match rule_constraints {
+                            HeaderConstraint::Unsatisfiable => {
+                                unsatisfiable = true;
+                            }
+                            HeaderConstraint::Constrained(bytes) => {
+                                for (i, &b) in bytes.iter().enumerate() {
+                                    match constrained_bytes.entry(i) {
+                                        Entry::Occupied(entry) => {
+                                            if *entry.get() != b {
+                                                unsatisfiable = true;
+                                                break;
+                                            }
+                                        }
+                                        Entry::Vacant(entry) => {
+                                            entry.insert(b);
+                                        }
+                                    }
+                                }
+                            }
+                            HeaderConstraint::Unconstrained => {}
+                        }
+                    }
+                }
                 Expr::Eq { lhs, rhs } => {
                     self.extract_header_constraints_from_eq(
                         *lhs,
@@ -1240,6 +1478,116 @@ impl IR {
         }
     }
 
+    /// Traverses the condition IR starting at the root and invokes
+    /// `f(pattern, K)` for any pattern that is unconditionally required to
+    /// match at constant offset `K` for the rule condition to evaluate to
+    /// `true`.
+    ///
+    /// For example, in `all of them and $a at 0`, `$a at 0` is a top-level
+    /// conjunct, so the rule cannot match unless `$a` matches at offset 0. Even
+    /// though `all of them` also references `$a` without an anchor, knowing
+    /// that `$a` is required at offset 0 allows keeping `$a` anchored at 0.
+    /// Conversely, in `$a at 0 or $a`, the root is an `or` expression:
+    /// `$a at 0` is not a top-level requirement, so `$a` cannot be anchored.
+    pub fn find_top_level_anchors(
+        &self,
+        mut f: impl FnMut(PatternIdx, usize),
+    ) {
+        // Returns true if the quantifier requires every item in `of` to match
+        // (e.g., `all of ...`, `100% of ...`, `N of ...` where N >= num_items,
+        // or `any of ($a)` when there is only 1 item).
+        let quantifier_requires_all =
+            |quantifier: &Quantifier, num_items: usize| match quantifier {
+                Quantifier::All => true,
+                Quantifier::Any => num_items == 1,
+                Quantifier::Percentage(expr) => self
+                    .get(*expr)
+                    .try_as_const_integer()
+                    .is_some_and(|p| p >= 100),
+                Quantifier::Expr(expr) => self
+                    .get(*expr)
+                    .try_as_const_integer()
+                    .is_some_and(|n| n >= num_items as i64),
+                Quantifier::None => false,
+            };
+
+        let mut dfs = self.dfs_iter(self.root.unwrap());
+
+        while let Some(evt) = dfs.next() {
+            let (expr, ctx) = match evt {
+                Event::Enter((_, expr, ctx)) => (expr, ctx),
+                _ => continue,
+            };
+
+            match (expr, ctx) {
+                // For `with <decls> : ( <body> )`, `dfs_iter` visits both the
+                // variable declarations (`EventContext::WithDeclaration`) and
+                // the body (`EventContext::Body`). Only the body determines
+                // whether the `with` expression is true, so prune the
+                // declaration initializers.
+                (_, EventContext::WithDeclaration) => {
+                    dfs.prune();
+                }
+                // `and` and `with` expressions must hold for their
+                // operands/body to hold, so let the DFS descend into their
+                // children.
+                (Expr::And { .. } | Expr::With(_), _) => {}
+                // An `of (<expr>, ...)` tuple whose quantifier requires all
+                // items to be true (such as `all of ($a at 0, $b)`) is
+                // equivalent to an `and` over its items, so let the DFS
+                // descend into its children.
+                (Expr::OfExprTuple(of), _)
+                    if matches!(of.anchor, MatchAnchor::None)
+                        && quantifier_requires_all(
+                            &of.quantifier,
+                            of.items.len(),
+                        ) => {}
+                // `$a at <const>`: `$a` is unconditionally required at
+                // `<const>`.
+                (
+                    Expr::PatternMatch {
+                        pattern,
+                        anchor: MatchAnchor::At(offset_expr),
+                    },
+                    _,
+                ) => {
+                    if let Some(offset) =
+                        self.get(*offset_expr).try_as_const_integer()
+                        && let Ok(offset) = usize::try_from(offset)
+                    {
+                        f(*pattern, offset);
+                    }
+                    dfs.prune();
+                }
+                // `<quantifier> of (<pattern set>) at <const>` where the
+                // quantifier requires every pattern in the set to match at
+                // `<const>` (e.g., `all of ($a*) at 0` or `any of ($a) at 0`).
+                (Expr::OfPatternSet(of), _) => {
+                    if let MatchAnchor::At(offset_expr) = of.anchor
+                        && quantifier_requires_all(
+                            &of.quantifier,
+                            of.items.len(),
+                        )
+                        && let Some(offset) =
+                            self.get(offset_expr).try_as_const_integer()
+                        && let Ok(offset) = usize::try_from(offset)
+                    {
+                        for pattern in &of.items {
+                            f(*pattern, offset);
+                        }
+                    }
+                    dfs.prune();
+                }
+                // Any other expression (`or`, `not`, loops, comparisons, etc.)
+                // does not unconditionally require its sub-expressions to match
+                // at a fixed offset, so prune its children.
+                _ => {
+                    dfs.prune();
+                }
+            }
+        }
+    }
+
     fn extract_header_constraints_from_eq(
         &self,
         lhs: ExprId,
@@ -1247,7 +1595,12 @@ impl IR {
         constrained_bytes: &mut BTreeMap<usize, u8>,
         unsatisfiable: &mut bool,
     ) {
-        if let Some(val) = self.get(rhs).try_as_const_integer()
+        // The bit pattern of the constant is used, even for unsigned
+        // constants greater than `i64::MAX`. If the integer read from the
+        // data can't be equal to the constant (e.g: `int64(0)` compared with
+        // an unsigned integer greater than `i64::MAX`), the expression is
+        // unsatisfiable anyway, and the constraint is harmless.
+        if let Some(val) = self.const_integer_bits(rhs)
             && self.apply_int_read_constraint(
                 constrained_bytes,
                 unsatisfiable,
@@ -1257,7 +1610,7 @@ impl IR {
         {
             return;
         }
-        if let Some(val) = self.get(lhs).try_as_const_integer() {
+        if let Some(val) = self.const_integer_bits(lhs) {
             self.apply_int_read_constraint(
                 constrained_bytes,
                 unsatisfiable,
@@ -1301,110 +1654,49 @@ impl IR {
             _ => return false,
         };
 
-        if let Some(offset) = func_call
+        // Width in bytes and endianness of each built-in function that
+        // reads an integer from the scanned data.
+        let (width, big_endian) = match func_call.plain_name() {
+            "uint8" | "int8" | "uint8be" | "int8be" => (1, false),
+            "uint16" | "int16" => (2, false),
+            "uint16be" | "int16be" => (2, true),
+            "uint32" | "int32" => (4, false),
+            "uint32be" | "int32be" => (4, true),
+            "uint64" | "int64" => (8, false),
+            "uint64be" | "int64be" => (8, true),
+            _ => return false,
+        };
+
+        let offset = match func_call
             .args
             .first()
             .and_then(|arg| self.get(*arg).try_as_const_integer())
-            && offset >= 0
+            .and_then(|offset| usize::try_from(offset).ok())
         {
-            match func_call.plain_name() {
-                "uint8" | "int8" | "uint8be" | "int8be" => {
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize,
-                        val as u8,
-                    );
-                    return true;
-                }
-                "uint16" | "int16" => {
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize,
-                        (val as u16 & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 1,
-                        ((val as u16 >> 8) & 0xff) as u8,
-                    );
-                    return true;
-                }
-                "uint16be" | "int16be" => {
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize,
-                        ((val as u16 >> 8) & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 1,
-                        (val as u16 & 0xff) as u8,
-                    );
-                    return true;
-                }
-                "uint32" | "int32" => {
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize,
-                        (val as u32 & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 1,
-                        ((val as u32 >> 8) & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 2,
-                        ((val as u32 >> 16) & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 3,
-                        ((val as u32 >> 24) & 0xff) as u8,
-                    );
-                    return true;
-                }
-                "uint32be" | "int32be" => {
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize,
-                        ((val as u32 >> 24) & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 1,
-                        ((val as u32 >> 16) & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 2,
-                        ((val as u32 >> 8) & 0xff) as u8,
-                    );
-                    self.add_constraint(
-                        constrained_bytes,
-                        unsatisfiable,
-                        offset as usize + 3,
-                        (val as u32 & 0xff) as u8,
-                    );
-                    return true;
-                }
-                _ => {}
-            }
+            Some(offset) => offset,
+            None => return false,
+        };
+
+        // Take the `width` least significant bytes of `val`, in the order
+        // in which they appear in the scanned data.
+        let le_bytes = val.to_le_bytes();
+        let be_bytes = val.to_be_bytes();
+        let bytes = if big_endian {
+            &be_bytes[8 - width..]
+        } else {
+            &le_bytes[..width]
+        };
+
+        for (i, byte) in bytes.iter().enumerate() {
+            self.add_constraint(
+                constrained_bytes,
+                unsatisfiable,
+                offset + i,
+                *byte,
+            );
         }
-        false
+
+        true
     }
 }
 
@@ -1553,16 +1845,20 @@ impl IR {
     }
 
     /// Creates a new [`Expr::Minus`].
-    pub fn minus(&mut self, operand: ExprId) -> ExprId {
+    pub fn minus(&mut self, operand: ExprId) -> Result<ExprId, Error> {
         if self.constant_folding {
-            match self.get(operand).type_value() {
-                TypeValue::Integer { value: Const(v), .. } => {
-                    return self.constant(TypeValue::const_integer_from(-v));
-                }
-                TypeValue::Float { value: Const(v), .. } => {
-                    return self.constant(TypeValue::const_float_from(-v));
-                }
-                _ => {}
+            let tv = self.get(operand).type_value();
+            if let Some(v) = tv.try_as_const_i128() {
+                // The result of negating an integer is always signed, even
+                // if the operand is unsigned. Like in other arithmetic
+                // operations, folding fails if the result doesn't fit in
+                // the result's type, as in `-(-9223372036854775808)` or
+                // `-(0xFFFFFFFFFFFFFFFF)`.
+                return TypeValue::const_integer_from_i128(-v, false)
+                    .map(|value| self.constant(value))
+                    .ok_or(Error::NumberOutOfRange);
+            } else if let TypeValue::Float { value: Const(v) } = tv {
+                return Ok(self.constant(TypeValue::const_float_from(-v)));
             }
         }
 
@@ -1574,7 +1870,7 @@ impl IR {
             is_float: matches!(self.get(operand).ty(), Type::Float),
         });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
-        expr_id
+        Ok(expr_id)
     }
 
     /// Creates a new [`Expr::Defined`].
@@ -1589,94 +1885,110 @@ impl IR {
 
     /// Creates a new [`Expr::BitwiseNot`].
     pub fn bitwise_not(&mut self, operand: ExprId) -> ExprId {
+        let type_value = self.get(operand).type_value();
+        let is_unsigned = type_value.is_unsigned();
+
         if self.constant_folding
-            && let Some(val) = self.get(operand).try_as_const_integer()
+            && let Some(val) = self.const_integer_bits(operand)
         {
-            return self.constant(TypeValue::const_integer_from(!val));
+            return self.constant(TypeValue::const_integer_from_bits(
+                !val,
+                is_unsigned,
+            ));
         }
 
         let expr_id = ExprId::from(self.nodes.len());
         self.parents[operand.0 as usize] = expr_id;
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::BitwiseNot { operand });
+        self.nodes.push(Expr::BitwiseNot { is_unsigned, operand });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         expr_id
     }
 
     /// Creates a new [`Expr::BitwiseAnd`].
     pub fn bitwise_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let is_unsigned = self.is_unsigned_result(&[lhs, rhs]);
+
         if self.constant_folding
-            && let (Some(lhs_val), Some(rhs_val)) = (
-                self.get(lhs).try_as_const_integer(),
-                self.get(rhs).try_as_const_integer(),
-            )
+            && let (Some(lhs_val), Some(rhs_val)) =
+                (self.const_integer_bits(lhs), self.const_integer_bits(rhs))
         {
-            return self
-                .constant(TypeValue::const_integer_from(lhs_val & rhs_val));
+            return self.constant(TypeValue::const_integer_from_bits(
+                lhs_val & rhs_val,
+                is_unsigned,
+            ));
         }
 
         let expr_id = ExprId::from(self.nodes.len());
         self.parents[lhs.0 as usize] = expr_id;
         self.parents[rhs.0 as usize] = expr_id;
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::BitwiseAnd { lhs, rhs });
+        self.nodes.push(Expr::BitwiseAnd { is_unsigned, lhs, rhs });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         expr_id
     }
 
     /// Creates a new [`Expr::BitwiseOr`].
     pub fn bitwise_or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let is_unsigned = self.is_unsigned_result(&[lhs, rhs]);
+
         if self.constant_folding
-            && let (Some(lhs_val), Some(rhs_val)) = (
-                self.get(lhs).try_as_const_integer(),
-                self.get(rhs).try_as_const_integer(),
-            )
+            && let (Some(lhs_val), Some(rhs_val)) =
+                (self.const_integer_bits(lhs), self.const_integer_bits(rhs))
         {
-            return self
-                .constant(TypeValue::const_integer_from(lhs_val | rhs_val));
+            return self.constant(TypeValue::const_integer_from_bits(
+                lhs_val | rhs_val,
+                is_unsigned,
+            ));
         }
 
         let expr_id = ExprId::from(self.nodes.len());
         self.parents[lhs.0 as usize] = expr_id;
         self.parents[rhs.0 as usize] = expr_id;
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::BitwiseOr { lhs, rhs });
+        self.nodes.push(Expr::BitwiseOr { is_unsigned, lhs, rhs });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         expr_id
     }
 
     /// Creates a new [`Expr::BitwiseXor`].
     pub fn bitwise_xor(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let is_unsigned = self.is_unsigned_result(&[lhs, rhs]);
+
         if self.constant_folding
-            && let (Some(lhs_val), Some(rhs_val)) = (
-                self.get(lhs).try_as_const_integer(),
-                self.get(rhs).try_as_const_integer(),
-            )
+            && let (Some(lhs_val), Some(rhs_val)) =
+                (self.const_integer_bits(lhs), self.const_integer_bits(rhs))
         {
-            return self
-                .constant(TypeValue::const_integer_from(lhs_val ^ rhs_val));
+            return self.constant(TypeValue::const_integer_from_bits(
+                lhs_val ^ rhs_val,
+                is_unsigned,
+            ));
         }
 
         let expr_id = ExprId::from(self.nodes.len());
         self.parents[lhs.0 as usize] = expr_id;
         self.parents[rhs.0 as usize] = expr_id;
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::BitwiseXor { lhs, rhs });
+        self.nodes.push(Expr::BitwiseXor { is_unsigned, lhs, rhs });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         expr_id
     }
 
     /// Creates a new [`Expr::Shl`].
     pub fn shl(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        // The signedness of the result is the signedness of the left operand.
+        let is_unsigned = self.get(lhs).type_value().is_unsigned();
+
         if self.constant_folding
             && let (Some(lhs_val), Some(rhs_val)) = (
-                self.get(lhs).try_as_const_integer(),
-                self.get(rhs).try_as_const_integer(),
+                self.const_integer_bits(lhs),
+                self.get(rhs).type_value().try_as_const_i128(),
             )
             && rhs_val >= 0
         {
-            return self.constant(TypeValue::const_integer_from(
+            return self.constant(TypeValue::const_integer_from_bits(
                 if rhs_val >= 64 { 0 } else { lhs_val << rhs_val },
+                is_unsigned,
             ));
         }
 
@@ -1684,22 +1996,35 @@ impl IR {
         self.parents[lhs.0 as usize] = expr_id;
         self.parents[rhs.0 as usize] = expr_id;
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::Shl { lhs, rhs });
+        self.nodes.push(Expr::Shl { is_unsigned, lhs, rhs });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         expr_id
     }
 
     /// Creates a new [`Expr::Shr`].
     pub fn shr(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        // The signedness of the result is the signedness of the left operand.
+        // Unsigned integers are shifted logically, while signed integers are
+        // shifted arithmetically.
+        let is_unsigned = self.get(lhs).type_value().is_unsigned();
+
         if self.constant_folding
             && let (Some(lhs_val), Some(rhs_val)) = (
-                self.get(lhs).try_as_const_integer(),
-                self.get(rhs).try_as_const_integer(),
+                self.const_integer_bits(lhs),
+                self.get(rhs).type_value().try_as_const_i128(),
             )
             && rhs_val >= 0
         {
-            return self.constant(TypeValue::const_integer_from(
-                if rhs_val >= 64 { 0 } else { lhs_val >> rhs_val },
+            let value = if rhs_val >= 64 {
+                0
+            } else if is_unsigned {
+                ((lhs_val as u64) >> rhs_val) as i64
+            } else {
+                lhs_val >> rhs_val
+            };
+            return self.constant(TypeValue::const_integer_from_bits(
+                value,
+                is_unsigned,
             ));
         }
 
@@ -1707,7 +2032,7 @@ impl IR {
         self.parents[lhs.0 as usize] = expr_id;
         self.parents[rhs.0 as usize] = expr_id;
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::Shr { lhs, rhs });
+        self.nodes.push(Expr::Shr { is_unsigned, lhs, rhs });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         expr_id
     }
@@ -1718,11 +2043,15 @@ impl IR {
             .iter()
             .any(|op| matches!(self.get(*op).ty(), Type::Float));
 
+        let is_unsigned = !is_float && self.is_unsigned_result(&operands);
+
         if self.constant_folding
             && let Some(value) = self.fold_arithmetic(
                 operands.as_slice(),
                 is_float,
+                is_unsigned,
                 |acc, x| acc + x,
+                |acc, x| acc.checked_add(x),
             )?
         {
             return Ok(self.constant(value));
@@ -1733,7 +2062,7 @@ impl IR {
             self.parents[operand.0 as usize] = expr_id;
         }
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::Add { operands, is_float });
+        self.nodes.push(Expr::Add { operands, is_float, is_unsigned });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         Ok(expr_id)
     }
@@ -1744,11 +2073,15 @@ impl IR {
             .iter()
             .any(|op| matches!(self.get(*op).ty(), Type::Float));
 
+        let is_unsigned = !is_float && self.is_unsigned_result(&operands);
+
         if self.constant_folding
             && let Some(value) = self.fold_arithmetic(
                 operands.as_slice(),
                 is_float,
+                is_unsigned,
                 |acc, x| acc - x,
+                |acc, x| acc.checked_sub(x),
             )?
         {
             return Ok(self.constant(value));
@@ -1759,7 +2092,7 @@ impl IR {
             self.parents[operand.0 as usize] = expr_id;
         }
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::Sub { operands, is_float });
+        self.nodes.push(Expr::Sub { operands, is_float, is_unsigned });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         Ok(expr_id)
     }
@@ -1770,11 +2103,15 @@ impl IR {
             .iter()
             .any(|op| matches!(self.get(*op).ty(), Type::Float));
 
+        let is_unsigned = !is_float && self.is_unsigned_result(&operands);
+
         if self.constant_folding
             && let Some(value) = self.fold_arithmetic(
                 operands.as_slice(),
                 is_float,
+                is_unsigned,
                 |acc, x| acc * x,
+                |acc, x| acc.checked_mul(x),
             )?
         {
             return Ok(self.constant(value));
@@ -1785,7 +2122,7 @@ impl IR {
             self.parents[operand.0 as usize] = expr_id;
         }
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::Mul { operands, is_float });
+        self.nodes.push(Expr::Mul { operands, is_float, is_unsigned });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         Ok(expr_id)
     }
@@ -1795,24 +2132,40 @@ impl IR {
         let is_float = operands
             .iter()
             .any(|op| matches!(self.get(*op).ty(), Type::Float));
+        let is_unsigned = !is_float && self.is_unsigned_result(&operands);
+
+        if self.constant_folding
+            && let Some(value) = self.fold_div(operands.as_slice())
+        {
+            return Ok(self.constant(value));
+        }
+
         let expr_id = ExprId::from(self.nodes.len());
         for operand in operands.iter() {
             self.parents[operand.0 as usize] = expr_id;
         }
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::Div { operands, is_float });
+        self.nodes.push(Expr::Div { operands, is_float, is_unsigned });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         Ok(expr_id)
     }
 
     /// Creates a new [`Expr::Mod`].
     pub fn modulus(&mut self, operands: Vec<ExprId>) -> Result<ExprId, Error> {
+        let is_unsigned = self.is_unsigned_result(&operands);
+
+        if self.constant_folding
+            && let Some(value) = self.fold_rem(operands.as_slice())
+        {
+            return Ok(self.constant(value));
+        }
+
         let expr_id = ExprId::from(self.nodes.len());
         for operand in operands.iter() {
             self.parents[operand.0 as usize] = expr_id;
         }
         self.parents.push(ExprId::none());
-        self.nodes.push(Expr::Mod { operands });
+        self.nodes.push(Expr::Mod { operands, is_unsigned });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         Ok(expr_id)
     }
@@ -2002,6 +2355,118 @@ impl IR {
         self.parents[lhs.0 as usize] = expr_id;
         self.parents.push(ExprId::none());
         self.nodes.push(Expr::MatchesMany { lhs, regex_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::EqMany`].
+    pub fn eq_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::EqMany { lhs, literal_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::IEqualsMany`].
+    pub fn iequals_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::IEqualsMany { lhs, literal_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::ContainsMany`].
+    pub fn contains_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::ContainsMany { lhs, literal_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::IContainsMany`].
+    pub fn icontains_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::IContainsMany { lhs, literal_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::StartsWithMany`].
+    pub fn starts_with_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::StartsWithMany { lhs, literal_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::IStartsWithMany`].
+    pub fn istarts_with_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::IStartsWithMany { lhs, literal_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::EndsWithMany`].
+    pub fn ends_with_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::EndsWithMany { lhs, literal_set });
+        debug_assert_eq!(self.parents.len(), self.nodes.len());
+        expr_id
+    }
+
+    /// Creates a new [`Expr::IEndsWithMany`].
+    pub fn iends_with_many(
+        &mut self,
+        lhs: ExprId,
+        literal_set: LiteralSetId,
+    ) -> ExprId {
+        let expr_id = ExprId::from(self.nodes.len());
+        self.parents[lhs.0 as usize] = expr_id;
+        self.parents.push(ExprId::none());
+        self.nodes.push(Expr::IEndsWithMany { lhs, literal_set });
         debug_assert_eq!(self.parents.len(), self.nodes.len());
         expr_id
     }
@@ -2347,14 +2812,51 @@ impl IR {
 }
 
 impl IR {
-    fn fold_arithmetic<F>(
+    /// Returns true if the result of an integer operation with the given
+    /// operands is an unsigned integer.
+    ///
+    /// The result is unsigned if at least one of the operands is unsigned,
+    /// regardless of the remaining operands, which are interpreted as
+    /// unsigned integers. Negative values wrap around, for instance, in
+    /// `uint64(0) + (-1)` the `-1` is interpreted as `0xFFFFFFFFFFFFFFFF`.
+    /// If all the operands are signed the result is signed. This is similar
+    /// to the usual arithmetic conversions in C, where mixing `int64_t` and
+    /// `uint64_t` produces an `uint64_t`.
+    ///
+    /// The results of `uint8`, `uint16` and `uint32` are promoted to signed
+    /// integers, as all their values fit in an `i64`, just like C promotes
+    /// integer types narrower than `int` to `int` (see
+    /// [`TypeValue::is_unsigned`]). So, `uint8(0) - 2` is signed, while
+    /// `uint64(0) + 1` and `uint64(0) \ uint8(1)` are unsigned.
+    ///
+    /// The signedness of the result depends only on the types of the
+    /// operands, never on their values. This guarantees that it doesn't
+    /// change depending on whether constant folding is enabled or not, or
+    /// on whether the operands are constants or variables.
+    pub(crate) fn is_unsigned_result(&self, operands: &[ExprId]) -> bool {
+        operands
+            .iter()
+            .any(|operand| self.get(*operand).type_value().is_unsigned())
+    }
+
+    /// If the expression is a constant integer, returns the bit pattern of
+    /// its value, regardless of its signedness.
+    fn const_integer_bits(&self, expr: ExprId) -> Option<i64> {
+        let tv = self.get(expr).type_value();
+        if tv.is_const() { tv.try_as_integer() } else { None }
+    }
+
+    fn fold_arithmetic<F, I>(
         &mut self,
         operands: &[ExprId],
         is_float: bool,
-        f: F,
+        is_unsigned: bool,
+        float_op: F,
+        mut int_op: I,
     ) -> Result<Option<TypeValue>, Error>
     where
         F: FnMut(f64, f64) -> f64,
+        I: FnMut(i128, i128) -> Option<i128>,
     {
         debug_assert!(!operands.is_empty());
 
@@ -2363,25 +2865,120 @@ impl IR {
             return Ok(None);
         }
 
-        // Fold all operands into a single value.
-        let folded = operands
-            .iter()
-            .map(|op| match self.get(*op).type_value() {
-                TypeValue::Integer { value: Const(v), .. } => v as f64,
-                TypeValue::Float { value: Const(v) } => v,
-                _ => unreachable!(),
-            })
-            .reduce(f) // It's safe to call unwrap because there must be at least
-            // one operand.
-            .unwrap();
-
         if is_float {
-            Ok(Some(TypeValue::const_float_from(folded)))
-        } else if folded >= i64::MIN as f64 && folded <= i64::MAX as f64 {
-            Ok(Some(TypeValue::const_integer_from(folded as i64)))
-        } else {
-            Err(Error::NumberOutOfRange)
+            // Fold all operands into a single value. It's safe to call
+            // unwrap because there must be at least one operand.
+            let folded = operands
+                .iter()
+                .map(|op| {
+                    let tv = self.get(*op).type_value();
+                    if let Some(v) = tv.try_as_const_i128() {
+                        v as f64
+                    } else if let TypeValue::Float { value: Const(v) } = tv {
+                        v
+                    } else {
+                        unreachable!()
+                    }
+                })
+                .reduce(float_op)
+                .unwrap();
+
+            return Ok(Some(TypeValue::const_float_from(folded)));
         }
+
+        // Integers are folded using exact arithmetic. Folding fails if the
+        // result doesn't fit in the type of the result.
+        let mut values = operands
+            .iter()
+            .map(|op| self.get(*op).type_value().try_as_const_i128().unwrap());
+
+        // It's safe to call unwrap because there must be at least one operand.
+        let first = values.next().unwrap();
+
+        values
+            .try_fold(first, &mut int_op)
+            .and_then(|folded| {
+                TypeValue::const_integer_from_i128(folded, is_unsigned)
+            })
+            .map(Some)
+            .ok_or(Error::NumberOutOfRange)
+    }
+
+    fn fold_div(&self, operands: &[ExprId]) -> Option<TypeValue> {
+        debug_assert!(!operands.is_empty());
+
+        if !operands.iter().all(|op| self.get(*op).type_value().is_const()) {
+            return None;
+        }
+
+        let to_f64 = |tv: &TypeValue| {
+            if let Some(v) = tv.try_as_const_i128() {
+                v as f64
+            } else if let TypeValue::Float { value: Const(v) } = tv {
+                *v
+            } else {
+                unreachable!()
+            }
+        };
+
+        let mut acc = self.get(operands[0]).type_value();
+
+        for (i, operand) in operands.iter().enumerate().skip(1) {
+            let rhs = self.get(*operand).type_value();
+
+            if matches!(acc.ty(), Type::Float)
+                || matches!(rhs.ty(), Type::Float)
+            {
+                acc = TypeValue::const_float_from(to_f64(&acc) / to_f64(&rhs));
+            } else {
+                let lhs_bits = acc.try_as_integer()?;
+                let rhs_bits = rhs.try_as_integer()?;
+
+                // Division by zero (or signed overflow) evaluates to undefined
+                // at runtime, so do not fold it into a constant.
+                if self.is_unsigned_result(&operands[..=i]) {
+                    let q = (lhs_bits as u64).checked_div(rhs_bits as u64)?;
+                    acc = TypeValue::const_unsigned_integer_from(q);
+                } else {
+                    let q = lhs_bits.checked_div(rhs_bits)?;
+                    acc = TypeValue::const_signed_integer_from(q);
+                }
+            }
+        }
+
+        Some(acc)
+    }
+
+    fn fold_rem(&self, operands: &[ExprId]) -> Option<TypeValue> {
+        debug_assert!(!operands.is_empty());
+
+        if !operands.iter().all(|op| self.get(*op).type_value().is_const()) {
+            return None;
+        }
+
+        let mut acc = self.get(operands[0]).type_value();
+
+        for (i, operand) in operands.iter().enumerate().skip(1) {
+            let rhs = self.get(*operand).type_value();
+            let lhs_bits = acc.try_as_integer()?;
+            let rhs_bits = rhs.try_as_integer()?;
+
+            // Modulo by zero evaluates to undefined at runtime, so do not fold
+            // it into a constant.
+            if rhs_bits == 0 {
+                return None;
+            }
+
+            if self.is_unsigned_result(&operands[..=i]) {
+                let r = (lhs_bits as u64).checked_rem(rhs_bits as u64)?;
+                acc = TypeValue::const_unsigned_integer_from(r);
+            } else {
+                let r = lhs_bits.wrapping_rem(rhs_bits);
+                acc = TypeValue::const_signed_integer_from(r);
+            }
+        }
+
+        Some(acc)
     }
 }
 
@@ -2451,6 +3048,14 @@ impl Debug for IR {
                         Expr::IEquals { .. } => writeln!(f, "IEQUALS -- hash: {expr_hash:#08x}")?,
                         Expr::Matches { .. } => writeln!(f, "MATCHES -- hash: {expr_hash:#08x}")?,
                         Expr::MatchesMany { regex_set, .. } => writeln!(f, "MATCHES_MANY RegexSetId({}) -- hash: {expr_hash:#08x}", usize::from(*regex_set))?,
+                        Expr::EqMany { literal_set, .. } => writeln!(f, "EQ_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
+                        Expr::IEqualsMany { literal_set, .. } => writeln!(f, "IEQUALS_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
+                        Expr::ContainsMany { literal_set, .. } => writeln!(f, "CONTAINS_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
+                        Expr::IContainsMany { literal_set, .. } => writeln!(f, "ICONTAINS_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
+                        Expr::StartsWithMany { literal_set, .. } => writeln!(f, "STARTS_WITH_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
+                        Expr::IStartsWithMany { literal_set, .. } => writeln!(f, "ISTARTS_WITH_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
+                        Expr::EndsWithMany { literal_set, .. } => writeln!(f, "ENDS_WITH_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
+                        Expr::IEndsWithMany { literal_set, .. } => writeln!(f, "IENDS_WITH_MANY LiteralSetId({}) -- hash: {expr_hash:#08x}", usize::from(*literal_set))?,
                         Expr::Defined { .. } => writeln!(f, "DEFINED -- hash: {expr_hash:#08x}")?,
                         Expr::FieldAccess { .. } => writeln!(f, "FIELD_ACCESS -- hash: {expr_hash:#08x}")?,
                         Expr::With { .. } => writeln!(f, "WITH -- hash: {expr_hash:#08x}")?,
@@ -2611,38 +3216,42 @@ pub(crate) enum Expr {
     /// Arithmetic minus.
     Minus { is_float: bool, operand: ExprId },
 
+    // In the integer operations below, `is_unsigned` indicates that the
+    // result of the operation is an unsigned integer. See
+    // `IR::is_unsigned_result` for the rules that determine the signedness
+    // of the result.
     /// Arithmetic addition (`+`) expression.
-    Add { is_float: bool, operands: Vec<ExprId> },
+    Add { is_float: bool, is_unsigned: bool, operands: Vec<ExprId> },
 
     /// Arithmetic subtraction (`-`) expression.
-    Sub { is_float: bool, operands: Vec<ExprId> },
+    Sub { is_float: bool, is_unsigned: bool, operands: Vec<ExprId> },
 
     /// Arithmetic multiplication (`*`) expression.
-    Mul { is_float: bool, operands: Vec<ExprId> },
+    Mul { is_float: bool, is_unsigned: bool, operands: Vec<ExprId> },
 
     /// Arithmetic division (`\`) expression.
-    Div { is_float: bool, operands: Vec<ExprId> },
+    Div { is_float: bool, is_unsigned: bool, operands: Vec<ExprId> },
 
     /// Arithmetic modulus (`%`) expression.
-    Mod { operands: Vec<ExprId> },
+    Mod { is_unsigned: bool, operands: Vec<ExprId> },
 
     /// Bitwise not (`~`) expression.
-    BitwiseNot { operand: ExprId },
+    BitwiseNot { is_unsigned: bool, operand: ExprId },
 
     /// Bitwise and (`&`) expression.
-    BitwiseAnd { rhs: ExprId, lhs: ExprId },
+    BitwiseAnd { is_unsigned: bool, rhs: ExprId, lhs: ExprId },
 
     /// Bitwise shift left (`<<`) expression.
-    Shl { rhs: ExprId, lhs: ExprId },
+    Shl { is_unsigned: bool, rhs: ExprId, lhs: ExprId },
 
     /// Bitwise shift right (`>>`) expression.
-    Shr { rhs: ExprId, lhs: ExprId },
+    Shr { is_unsigned: bool, rhs: ExprId, lhs: ExprId },
 
     /// Bitwise or (`|`) expression.
-    BitwiseOr { rhs: ExprId, lhs: ExprId },
+    BitwiseOr { is_unsigned: bool, rhs: ExprId, lhs: ExprId },
 
     /// Bitwise xor (`^`) expression.
-    BitwiseXor { rhs: ExprId, lhs: ExprId },
+    BitwiseXor { is_unsigned: bool, rhs: ExprId, lhs: ExprId },
 
     /// Equal (`==`) expression.
     Eq { rhs: ExprId, lhs: ExprId },
@@ -2689,6 +3298,32 @@ pub(crate) enum Expr {
     /// Match expression similar to `Expr::Matches` but that matches against
     /// multiple regular expressions at the same time.
     MatchesMany { lhs: ExprId, regex_set: RegexSetId },
+
+    /// Equality expression similar to `Expr::Eq` that compares a string against
+    /// multiple string literals.
+    EqMany { lhs: ExprId, literal_set: LiteralSetId },
+
+    /// Case-insensitive equality expression similar to `Expr::IEquals` that
+    /// compares a string against multiple string literals.
+    IEqualsMany { lhs: ExprId, literal_set: LiteralSetId },
+
+    /// `contains` expression that checks a string against multiple string literals.
+    ContainsMany { lhs: ExprId, literal_set: LiteralSetId },
+
+    /// `icontains` expression that checks a string against multiple string literals.
+    IContainsMany { lhs: ExprId, literal_set: LiteralSetId },
+
+    /// `startswith` expression that checks a string against multiple string literals.
+    StartsWithMany { lhs: ExprId, literal_set: LiteralSetId },
+
+    /// `istartswith` expression that checks a string against multiple string literals.
+    IStartsWithMany { lhs: ExprId, literal_set: LiteralSetId },
+
+    /// `endswith` expression that checks a string against multiple string literals.
+    EndsWithMany { lhs: ExprId, literal_set: LiteralSetId },
+
+    /// `iendswith` expression that checks a string against multiple string literals.
+    IEndsWithMany { lhs: ExprId, literal_set: LiteralSetId },
 
     /// A `defined` expression (e.g. `defined foo`)
     Defined { operand: ExprId },
@@ -2854,6 +3489,15 @@ impl ForVars {
         self.count.shift(after, amount);
         self.item.shift(after, amount);
     }
+
+    pub fn max_index(&self) -> i32 {
+        self.n
+            .index()
+            .max(self.i.index())
+            .max(self.max_count.index())
+            .max(self.count.index())
+            .max(self.item.index())
+    }
 }
 
 /// A `with <identifiers> : ...` expression. (e.g. `with $a, $b : ( ... )`)
@@ -2902,7 +3546,9 @@ impl Iterable {
                     lower_bound.try_as_const_integer(),
                     upper_bound.try_as_const_integer(),
                 ) {
-                    upper_val.add(1).checked_sub(lower_val)
+                    upper_val
+                        .checked_sub(lower_val)
+                        .map(|d| d.saturating_add(1))
                 } else {
                     None
                 }
@@ -2990,15 +3636,32 @@ impl Hash for Expr {
 }
 
 impl Expr {
-    /// Returns the size of the stack frame for this expression.
-    pub fn stack_frame_size(&self) -> i32 {
+    /// Returns the maximum variable index referenced or declared directly by
+    /// this expression, or `None` if it neither declares nor references any
+    /// variables.
+    pub fn max_var_index(&self) -> Option<i32> {
         match self {
-            Expr::With(with) => with.declarations.len() as i32,
-            Expr::ForOf(_) => VarStack::FOR_OF_FRAME_SIZE,
-            Expr::ForIn(_) => VarStack::FOR_IN_FRAME_SIZE,
-            Expr::OfExprTuple(_) => VarStack::OF_FRAME_SIZE,
-            Expr::OfPatternSet(_) => VarStack::OF_FRAME_SIZE,
-            _ => 0,
+            Expr::Symbol(symbol)
+            | Expr::PatternMatchVar { symbol, .. }
+            | Expr::PatternCountVar { symbol, .. }
+            | Expr::PatternOffsetVar { symbol, .. }
+            | Expr::PatternLengthVar { symbol, .. } => match symbol.as_ref() {
+                Symbol::Var { var, .. } => Some(var.index()),
+                _ => None,
+            },
+            Expr::With(with) => {
+                with.declarations.iter().map(|(v, _)| v.index()).max()
+            }
+            Expr::OfExprTuple(of) => Some(of.for_vars.max_index()),
+            Expr::OfPatternSet(of) => Some(of.for_vars.max_index()),
+            Expr::ForOf(for_of) => Some(for_of.for_vars.max_index()),
+            Expr::ForIn(for_in) => for_in
+                .variables
+                .iter()
+                .map(|v| v.index())
+                .chain(std::iter::once(for_in.for_vars.max_index()))
+                .max(),
+            _ => None,
         }
     }
 
@@ -3101,7 +3764,7 @@ impl Expr {
             Expr::Not { operand }
             | Expr::Minus { operand, .. }
             | Expr::Defined { operand }
-            | Expr::BitwiseNot { operand } => {
+            | Expr::BitwiseNot { operand, .. } => {
                 if *operand == child {
                     *operand = replacement;
                 }
@@ -3117,11 +3780,11 @@ impl Expr {
                 replace_in_slice(operands.as_mut_slice());
             }
 
-            Expr::BitwiseAnd { lhs, rhs }
-            | Expr::Shl { lhs, rhs }
-            | Expr::Shr { lhs, rhs }
-            | Expr::BitwiseOr { lhs, rhs }
-            | Expr::BitwiseXor { lhs, rhs }
+            Expr::BitwiseAnd { lhs, rhs, .. }
+            | Expr::Shl { lhs, rhs, .. }
+            | Expr::Shr { lhs, rhs, .. }
+            | Expr::BitwiseOr { lhs, rhs, .. }
+            | Expr::BitwiseXor { lhs, rhs, .. }
             | Expr::Eq { lhs, rhs }
             | Expr::Ne { lhs, rhs }
             | Expr::Lt { lhs, rhs }
@@ -3143,7 +3806,15 @@ impl Expr {
                     *rhs = replacement;
                 }
             }
-            Expr::MatchesMany { lhs, .. } => {
+            Expr::MatchesMany { lhs, .. }
+            | Expr::EqMany { lhs, .. }
+            | Expr::IEqualsMany { lhs, .. }
+            | Expr::ContainsMany { lhs, .. }
+            | Expr::IContainsMany { lhs, .. }
+            | Expr::StartsWithMany { lhs, .. }
+            | Expr::IStartsWithMany { lhs, .. }
+            | Expr::EndsWithMany { lhs, .. }
+            | Expr::IEndsWithMany { lhs, .. } => {
                 if *lhs == child {
                     *lhs = replacement;
                 }
@@ -3196,11 +3867,13 @@ impl Expr {
             }
 
             Expr::OfExprTuple(of) => {
+                replace_in_quantifier(&mut of.quantifier);
                 replace_in_slice(of.items.as_mut_slice());
                 replace_in_anchor(&mut of.anchor);
             }
 
             Expr::OfPatternSet(of) => {
+                replace_in_quantifier(&mut of.quantifier);
                 replace_in_anchor(&mut of.anchor);
             }
 
@@ -3213,6 +3886,17 @@ impl Expr {
 
             Expr::ForIn(for_in) => {
                 replace_in_quantifier(&mut for_in.quantifier);
+                match &mut for_in.iterable {
+                    Iterable::Range(range) => replace_in_range(range),
+                    Iterable::ExprTuple(exprs) => {
+                        replace_in_slice(exprs.as_mut_slice())
+                    }
+                    Iterable::Expr(expr) => {
+                        if *expr == child {
+                            *expr = replacement;
+                        }
+                    }
+                }
                 if for_in.body == child {
                     for_in.body = replacement
                 }
@@ -3253,6 +3937,14 @@ impl Expr {
             | Expr::IEquals { .. }
             | Expr::Matches { .. }
             | Expr::MatchesMany { .. }
+            | Expr::EqMany { .. }
+            | Expr::IEqualsMany { .. }
+            | Expr::ContainsMany { .. }
+            | Expr::IContainsMany { .. }
+            | Expr::StartsWithMany { .. }
+            | Expr::IStartsWithMany { .. }
+            | Expr::EndsWithMany { .. }
+            | Expr::IEndsWithMany { .. }
             | Expr::PatternMatch { .. }
             | Expr::PatternMatchVar { .. }
             | Expr::OfExprTuple(_)
@@ -3325,6 +4017,14 @@ impl Expr {
             | Expr::IEquals { .. }
             | Expr::Matches { .. }
             | Expr::MatchesMany { .. }
+            | Expr::EqMany { .. }
+            | Expr::IEqualsMany { .. }
+            | Expr::ContainsMany { .. }
+            | Expr::IContainsMany { .. }
+            | Expr::StartsWithMany { .. }
+            | Expr::IStartsWithMany { .. }
+            | Expr::EndsWithMany { .. }
+            | Expr::IEndsWithMany { .. }
             | Expr::PatternMatch { .. }
             | Expr::PatternMatchVar { .. }
             | Expr::OfExprTuple(_)
@@ -3336,18 +4036,34 @@ impl Expr {
                 if *is_float {
                     TypeValue::unknown_float()
                 } else {
-                    TypeValue::unknown_integer()
+                    TypeValue::unknown_signed_integer()
                 }
             }
 
-            Expr::Add { is_float, .. }
-            | Expr::Sub { is_float, .. }
-            | Expr::Mul { is_float, .. }
-            | Expr::Div { is_float, .. } => {
+            Expr::Add { is_float, is_unsigned, .. }
+            | Expr::Sub { is_float, is_unsigned, .. }
+            | Expr::Mul { is_float, is_unsigned, .. }
+            | Expr::Div { is_float, is_unsigned, .. } => {
                 if *is_float {
                     TypeValue::unknown_float()
+                } else if *is_unsigned {
+                    TypeValue::unknown_unsigned_integer()
                 } else {
-                    TypeValue::unknown_integer()
+                    TypeValue::unknown_signed_integer()
+                }
+            }
+
+            Expr::Mod { is_unsigned, .. }
+            | Expr::BitwiseNot { is_unsigned, .. }
+            | Expr::BitwiseAnd { is_unsigned, .. }
+            | Expr::BitwiseOr { is_unsigned, .. }
+            | Expr::BitwiseXor { is_unsigned, .. }
+            | Expr::Shl { is_unsigned, .. }
+            | Expr::Shr { is_unsigned, .. } => {
+                if *is_unsigned {
+                    TypeValue::unknown_unsigned_integer()
+                } else {
+                    TypeValue::unknown_signed_integer()
                 }
             }
 
@@ -3357,20 +4073,24 @@ impl Expr {
             | Expr::PatternOffset { .. }
             | Expr::PatternOffsetVar { .. }
             | Expr::PatternLength { .. }
-            | Expr::PatternLengthVar { .. }
-            | Expr::Mod { .. }
-            | Expr::BitwiseNot { .. }
-            | Expr::BitwiseAnd { .. }
-            | Expr::BitwiseOr { .. }
-            | Expr::BitwiseXor { .. }
-            | Expr::Shl { .. }
-            | Expr::Shr { .. } => TypeValue::unknown_integer(),
+            | Expr::PatternLengthVar { .. } => {
+                TypeValue::unknown_signed_integer()
+            }
 
             Expr::Symbol(symbol) => symbol.type_value().clone(),
             Expr::FieldAccess(field_access) => field_access.type_value.clone(),
             Expr::FuncCall(func_call) => func_call.signature.result.clone(),
             Expr::Lookup(lookup) => lookup.type_value.clone(),
             Expr::With(with) => with.type_value.clone(),
+        }
+    }
+
+    /// Panics if the expression is not [`Expr::Const`].
+    pub fn as_const(&self) -> &TypeValue {
+        if let Expr::Const(type_value) = self {
+            type_value
+        } else {
+            panic!("called `as_const` on an Expr that is not Expr::Const")
         }
     }
 
@@ -3386,11 +4106,12 @@ impl Expr {
 
     /// If the expression is a constant integer, returns its value, if not
     /// returns [`None`]
+    ///
+    /// Also returns [`None`] for unsigned constants that don't fit in an
+    /// `i64`.
     pub fn try_as_const_integer(&self) -> Option<i64> {
-        if let TypeValue::Integer { value: Const(v), .. } = self.type_value() {
-            Some(v)
-        } else {
-            None
-        }
+        self.type_value()
+            .try_as_const_i128()
+            .and_then(|v| i64::try_from(v).ok())
     }
 }
